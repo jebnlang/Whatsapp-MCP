@@ -197,6 +197,39 @@ def send_whatsapp_message(recipient_jid, message_text, media_path=None):
         print(f"    Unexpected error during WhatsApp send: {e}")
         return False
 
+# --- Helper function to get quoted message text (limited length) ---
+def get_quoted_message_text(db_path, quoted_id, chat_jid):
+    """Fetches the content of the original message being replied to."""
+    # Basic validation
+    if not quoted_id or not chat_jid:
+        return None, None # Return None for both sender and content
+        
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        # Fetch sender and content of the quoted message
+        cursor.execute("""
+            SELECT sender, content 
+            FROM messages 
+            WHERE id = ? AND chat_jid = ?
+        """, (quoted_id, chat_jid))
+        result = cursor.fetchone()
+        if result:
+            # Return sender JID and the content
+            return result[0], result[1] 
+        else:
+            # Quoted message might be too old or not synced
+            print(f"    Quoted message ID {quoted_id} not found in DB for chat {chat_jid}.")
+            return None, None
+    except sqlite3.Error as e:
+        print(f"  Database error fetching quoted message {quoted_id}: {e}")
+        return None, None
+    finally:
+        if conn:
+            conn.close()
+
+
 # --- Main Logic (Modified) ---
 
 def main():
@@ -292,7 +325,6 @@ def main():
     total_forwarded_text_only = 0
     
     print("\nStarting message search and processing...")
-    # Loop through SOURCE groups
     for group_jid in selected_source_group_jids:
         print(f"--- Processing source group {group_jid} ---")
         
@@ -302,8 +334,14 @@ def main():
         try:
             conn = sqlite3.connect(args.db_path)
             cursor = conn.cursor()
-            query = "SELECT content, timestamp FROM messages WHERE chat_jid = ? AND content IS NOT NULL" # Fetch timestamp too for info
+            # Update query to select new reply columns
+            query = """ 
+                SELECT content, timestamp, is_reply, quoted_message_id, quoted_sender 
+                FROM messages 
+                WHERE chat_jid = ? AND content IS NOT NULL 
+            """ 
             params = [group_jid]
+            # Append date conditions
             if start_date_str: query += " AND datetime(timestamp) >= datetime(?) "; params.append(start_date_str + "T00:00:00")
             if end_date_str: query += " AND datetime(timestamp) < datetime(?) "; params.append((datetime.strptime(end_date_str, '%Y-%m-%d') + timedelta(days=1)).isoformat())
             query += " ORDER BY timestamp"
@@ -319,20 +357,59 @@ def main():
             if conn:
                 conn.close()
                 
-        # Process messages found
-        for message_content, message_timestamp in all_messages_in_range:
+        # Process messages found in the source group
+        # Unpack new columns from the fetched data
+        for message_content, message_timestamp, is_reply, quoted_id, quoted_sender_jid in all_messages_in_range:
             total_processed += 1
             print(f"\nProcessing message from {message_timestamp}...")
+            
+            # --- DEBUG: Print raw reply info from DB --- 
+            print(f"    DEBUG: is_reply={is_reply} (type: {type(is_reply)}), quoted_id='{quoted_id}', quoted_sender='{quoted_sender_jid}'")
+            # --- END DEBUG --- 
+            
             links = extract_links(message_content)
             
             if not links:
-                print("  No links found in this message, skipping.")
-                continue
+                 # --- DEBUG: Add reason for skipping --- 
+                 print("    DEBUG: Skipping message - No links found.")
+                 # --- END DEBUG --- 
+                 continue
 
+            # --- DEBUG: Print link found --- 
             first_link = links[0]
-            print(f"  Found link: {first_link}")
+            print(f"    DEBUG: Found link: {first_link}")
+            # --- END DEBUG --- 
             
-            # Fetch metadata
+            # --- Get Reply Context --- 
+            reply_prefix = "" # Start with empty prefix
+            if is_reply and quoted_id:
+                 # --- DEBUG: Entering reply processing --- 
+                 print(f"    DEBUG: Attempting to process as reply.")
+                 # --- END DEBUG --- 
+                 print(f"    Message is a reply to ID: {quoted_id} from {quoted_sender_jid}")
+                 # Fetch the quoted message text
+                 quoted_sender_display = quoted_sender_jid.split('@')[0] if quoted_sender_jid else "Unknown"
+                 _q_sender, quoted_text = get_quoted_message_text(args.db_path, quoted_id, group_jid) # Fetch from the same group JID
+                 if quoted_text:
+                     # Use full quoted text, remove newline replacement and limit
+                     # snippet = quoted_text.strip().replace('\n', ' ')[:60] # Limit length
+                     full_quoted = quoted_text.strip() # Keep original newlines if desired, or replace with space
+                     # reply_prefix = f"[Replying to {quoted_sender_display}: \"{snippet}...\"]\n---\n" 
+                     reply_prefix = f"[Replying to {quoted_sender_display}: \"{full_quoted}\"]\n---\n"
+                 else:
+                     reply_prefix = f"[Replying to {quoted_sender_display}]\n---\n" # Prefix even if text isn't found
+            elif is_reply:
+                 # --- DEBUG: is_reply is true but quoted_id is missing --- 
+                 print(f"    DEBUG: is_reply is true, but quoted_id is missing/empty ('{quoted_id}'). Cannot fetch context.")
+                 # --- END DEBUG --- 
+            else:
+                 # --- DEBUG: Not a reply --- 
+                 print(f"    DEBUG: Not a reply (is_reply={is_reply}).")
+                 # --- END DEBUG --- 
+                 pass # Not a reply
+            # --- End Get Reply Context ---
+            
+            # Fetch metadata for preview
             metadata = fetch_link_metadata(first_link)
             temp_image_path = None
             success = False
@@ -342,20 +419,22 @@ def main():
                     temp_image_path = download_image_temp(metadata['image_url'])
                     
                     if temp_image_path:
-                        # Construct text message with metadata
-                        preview_text = f"{metadata.get('title', '')}\n{metadata.get('description', '')}\n{first_link}".strip()
+                        # Construct text message with metadata AND reply prefix
+                        # preview_text = f"{metadata.get('title', '')}\n{metadata.get('description', '')}\n{first_link}".strip()
+                        # CHANGE: Always use original message content for the text part, even with image
+                        final_text_to_send = reply_prefix + message_content # Prepend reply info
                         # Send image + text to the DESTINATION group
-                        success = send_whatsapp_message(destination_group_jid, preview_text, media_path=temp_image_path)
+                        success = send_whatsapp_message(destination_group_jid, final_text_to_send, media_path=temp_image_path)
                         if success: total_forwarded_with_preview += 1
                     else:
                         print("    Image download failed, falling back to text only.")
-                        # Send original content to the DESTINATION group
-                        success = send_whatsapp_message(destination_group_jid, message_content) 
+                        final_text_to_send = reply_prefix + message_content # Prepend reply info to original content
+                        success = send_whatsapp_message(destination_group_jid, final_text_to_send)
                         if success: total_forwarded_text_only += 1
                 else:
                     print("    No image metadata found or fetch failed, sending text only.")
-                    # Send original content to the DESTINATION group
-                    success = send_whatsapp_message(destination_group_jid, message_content) 
+                    final_text_to_send = reply_prefix + message_content # Prepend reply info to original content
+                    success = send_whatsapp_message(destination_group_jid, final_text_to_send)
                     if success: total_forwarded_text_only += 1
             finally:
                  # Clean up temporary image file if it exists
