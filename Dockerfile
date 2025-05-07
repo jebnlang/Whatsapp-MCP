@@ -15,18 +15,18 @@ COPY whatsapp-mcp/whatsapp-bridge/ ./
 # Build the Go application
 RUN CGO_ENABLED=1 GOOS=linux go build -a -installsuffix cgo -o /whatsapp-bridge main.go
 
-# Stage 2: Setup Python environment and final image
-FROM python:3.10-slim
+# Stage 2: Setup Python environment and final image ON ALPINE
+FROM python:3.10-alpine
 WORKDIR /app
 
-# Install system dependencies:
-# - cron: for scheduling the Python script
-# - tini: a lightweight init system to properly manage processes (like our Go bridge)
-# - procps: provides `ps` and other utilities, good for debugging
-# - libsqlite3-0: runtime library for SQLite
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends cron tini procps libsqlite3-0 && \
-    rm -rf /var/lib/apt/lists/*
+# Install system dependencies using apk:
+# - tini: for proper signal handling and zombie reaping
+# - cronie: cron implementation for Alpine (busybox-cron is also an option)
+# - procps: for utilities like ps (often included in busybox on Alpine)
+# - sqlite-libs: runtime SQLite libraries for Alpine
+# - file: the 'file' utility for debugging
+# - bash: for ldd script and general utility
+RUN apk add --no-cache tini cronie procps sqlite-libs file bash
 
 # Copy the compiled Go executable from the builder stage
 COPY --from=builder /whatsapp-bridge ./
@@ -43,12 +43,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # This directory will be mounted as a volume in Railway
 RUN mkdir -p /app/store
 
-# Setup cron job for the Python script
-# Create a crontab file that runs the script at 11:50 PM server time daily
-# Output and errors from the cron job will be logged to /var/log/cron.log
-RUN echo "50 23 * * * python /app/forward_links_preview.py >> /var/log/cron.log 2>&1" > /etc/cron.d/whatsapp-forwarder
-# Give execution rights on the cron job file
-RUN chmod 0644 /etc/cron.d/whatsapp-forwarder
+# Setup cron job for the Python script with cronie
+# cronie reads crontabs from /var/spool/cron/crontabs/ or /etc/crontabs/
+RUN mkdir -p /var/spool/cron/crontabs
+RUN echo "50 23 * * * python /app/forward_links_preview.py >> /var/log/cron.log 2>&1" > /var/spool/cron/crontabs/root
+# Ensure root crontab has correct permissions if needed (usually handled by cronie daemon)
 # Create log file for cron output
 RUN touch /var/log/cron.log
 
@@ -60,9 +59,8 @@ RUN ls -la /app  # <--- DEBUG: List contents after setting up entrypoint.sh
 # Expose the Go bridge port (default 8080)
 EXPOSE 8080
 
-# Set tini as the entrypoint, which will manage our entrypoint.sh script.
-# tini helps handle signals correctly and reaps zombie processes.
-ENTRYPOINT ["/usr/bin/tini", "--"]
+# Set tini as the entrypoint
+ENTRYPOINT ["/usr/sbin/tini", "--"]
 
-# Command to run when the container starts
+# Command to run when the container starts. cronie daemon started by entrypoint.sh
 CMD ["/app/entrypoint.sh"] 
