@@ -10,7 +10,7 @@ RUN go mod download
 COPY whatsapp-mcp/whatsapp-bridge/ ./
 
 # Build the Go application as a static binary
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o /whatsapp-bridge main.go
+RUN CGO_ENABLED=1 GOOS=linux go build -a -installsuffix cgo -o /whatsapp-bridge main.go
 
 # Stage 2: Setup Python environment and final image
 FROM python:3.10-slim
