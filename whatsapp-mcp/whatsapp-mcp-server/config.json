@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "whatsapp": {
+      "command": "/Users/benjaminlang/.local/bin/uv",
+      "args": [
+        "--directory",
+        "/Users/benjaminlang/Documents/Code/Whatsapp MCP/whatsapp-mcp/whatsapp-mcp-server",
+        "run",
+        "main.py"
+      ]
+    }
+  }
+}
+
