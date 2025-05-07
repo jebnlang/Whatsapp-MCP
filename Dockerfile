@@ -2,6 +2,9 @@
 FROM golang:1.24-alpine AS builder
 WORKDIR /app
 
+# Install C build tools needed for cgo (for go-sqlite3)
+RUN apk add --no-cache build-base gcc musl-dev 
+
 # Copy go.mod and go.sum first to leverage Docker cache
 COPY whatsapp-mcp/whatsapp-bridge/go.mod whatsapp-mcp/whatsapp-bridge/go.sum ./
 RUN go mod download
