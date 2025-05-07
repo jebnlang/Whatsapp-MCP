@@ -29,6 +29,7 @@ RUN apt-get update && \
 
 # Copy the compiled Go executable from the builder stage
 COPY --from=builder /whatsapp-bridge ./
+RUN ls -la /app  # <--- DEBUG: List contents after copying whatsapp-bridge
 
 # Copy the Python script
 COPY forward_links_preview.py ./
@@ -55,6 +56,7 @@ RUN touch /var/log/cron.log
 # Copy the entrypoint script and make it executable
 COPY entrypoint.sh ./
 RUN chmod +x entrypoint.sh
+RUN ls -la /app  # <--- DEBUG: List contents after setting up entrypoint.sh
 
 # Expose the Go bridge port (default 8080)
 EXPOSE 8080
