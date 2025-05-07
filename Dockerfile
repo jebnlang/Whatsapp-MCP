@@ -26,7 +26,7 @@ WORKDIR /app
 # - sqlite-libs: runtime SQLite libraries for Alpine
 # - file: the 'file' utility for debugging
 # - bash: for ldd script and general utility
-RUN apk add --no-cache tini cronie procps sqlite-libs file bash
+RUN apk add --no-cache musl tini cronie procps sqlite-libs file bash
 
 # Copy the compiled Go executable from the builder stage
 COPY --from=builder /whatsapp-bridge ./
