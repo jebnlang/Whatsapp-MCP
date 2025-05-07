@@ -13,7 +13,7 @@ RUN go mod download
 COPY whatsapp-mcp/whatsapp-bridge/ ./
 
 # Build the Go application
-RUN CGO_ENABLED=1 GOOS=linux go build -a -installsuffix cgo -tags 'sqlite_omit_load_extension,sqlite_json1,sqlite_stat4,sqlite_fts5' -ldflags '-extldflags "-static"' -o /whatsapp-bridge main.go
+RUN CGO_ENABLED=1 GOOS=linux go build -a -installsuffix cgo -o /whatsapp-bridge main.go
 
 # Stage 2: Setup Python environment and final image
 FROM python:3.10-slim
@@ -23,8 +23,9 @@ WORKDIR /app
 # - cron: for scheduling the Python script
 # - tini: a lightweight init system to properly manage processes (like our Go bridge)
 # - procps: provides `ps` and other utilities, good for debugging
+# - libsqlite3-0: runtime library for SQLite
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends cron tini procps && \
+    apt-get install -y --no-install-recommends cron tini procps libsqlite3-0 && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy the compiled Go executable from the builder stage
@@ -48,8 +49,6 @@ RUN mkdir -p /app/store
 RUN echo "50 23 * * * python /app/forward_links_preview.py >> /var/log/cron.log 2>&1" > /etc/cron.d/whatsapp-forwarder
 # Give execution rights on the cron job file
 RUN chmod 0644 /etc/cron.d/whatsapp-forwarder
-# Apply cron job (though cron daemon needs to be running)
-# RUN crontab /etc/cron.d/whatsapp-forwarder # This step might be redundant if cron service reads from /etc/cron.d
 # Create log file for cron output
 RUN touch /var/log/cron.log
 
