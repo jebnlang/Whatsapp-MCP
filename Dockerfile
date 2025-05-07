@@ -12,8 +12,8 @@ RUN go mod download
 # Copy the rest of the Go bridge source code
 COPY whatsapp-mcp/whatsapp-bridge/ ./
 
-# Build the Go application as a static binary
-RUN CGO_ENABLED=1 GOOS=linux go build -a -installsuffix cgo -o /whatsapp-bridge main.go
+# Build the Go application
+RUN CGO_ENABLED=1 GOOS=linux go build -a -installsuffix cgo -tags 'sqlite_omit_load_extension,sqlite_json1,sqlite_stat4,sqlite_fts5' -ldflags '-extldflags "-static"' -o /whatsapp-bridge main.go
 
 # Stage 2: Setup Python environment and final image
 FROM python:3.10-slim
