@@ -14,8 +14,8 @@ import shutil # For saving image data
 
 # --- Configuration ---
 # RECIPIENT_JID = "972526060403@s.whatsapp.net" # Removed hardcoded recipient
-WHATSAPP_API_BASE_URL = "http://localhost:8080/api"
-DEFAULT_DELAY = 3.0 # Increased default delay due to web requests
+WHATSAPP_API_BASE_URL = os.getenv("WHATSAPP_API_BASE_URL", "http://localhost:8080/api") # Get from Env
+DEFAULT_DELAY = float(os.getenv("DEFAULT_DELAY", "3.0")) # Increased default delay due to web requests
 MAX_WHATSAPP_MESSAGE_LENGTH = 1500 # For warning only
 REQUESTS_TIMEOUT = 10 # Timeout for fetching URLs/images
 # Mimic a browser User-Agent
@@ -235,100 +235,72 @@ def get_quoted_message_text(db_path, quoted_id, chat_jid):
 def main():
     # Update description
     parser = argparse.ArgumentParser(description="Finds links in source WhatsApp groups/dates, attempts to fetch preview data, and forwards to a selected destination group.")
-    parser.add_argument("--db-path", type=str, required=True, help="Path to the WhatsApp messages.db file.")
+    # DB Path can still be an argument for local testing, but will default to env var
+    parser.add_argument("--db-path", type=str, default=os.getenv("WHATSAPP_DB_PATH", "store/messages.db"), help="Path to the WhatsApp messages.db file.")
     parser.add_argument("--delay", type=float, default=DEFAULT_DELAY, help=f"Delay between forwarding messages (default: {DEFAULT_DELAY}).")
     args = parser.parse_args()
 
-    # --- Get Groups --- 
-    print("Fetching available groups...")
+    # --- Get Configuration from Environment Variables ---
+    destination_group_jid = os.getenv("DESTINATION_GROUP_JID")
+    source_group_jids_str = os.getenv("SOURCE_GROUP_JIDS")
+
+    if not destination_group_jid:
+        print("Error: DESTINATION_GROUP_JID environment variable not set.")
+        sys.exit(1)
+    if not source_group_jids_str:
+        print("Error: SOURCE_GROUP_JIDS environment variable not set.")
+        sys.exit(1)
+
+    selected_source_group_jids = [jid.strip() for jid in source_group_jids_str.split(',') if jid.strip()]
+    if not selected_source_group_jids:
+        print("Error: No valid source group JIDs found in SOURCE_GROUP_JIDS environment variable.")
+        sys.exit(1)
+
+    print(f"Configuration:")
+    print(f"  Database Path: {args.db_path}")
+    print(f"  Destination Group JID: {destination_group_jid}")
+    print(f"  Source Group JIDs: {selected_source_group_jids}")
+    print(f"  Delay: {args.delay}s")
+    print(f"  API Base URL: {WHATSAPP_API_BASE_URL}")
+
+
+    # --- Get Groups (for JID to Name mapping) ---
+    print("\nFetching available groups for name mapping...")
     groups_list = get_groups(args.db_path)
     if not groups_list:
-        print("Error: No groups found in the database.")
-        return
+        print("Warning: No groups found in the database for name mapping. Using JIDs as names.")
+        group_jid_to_name = {}
+    else:
+        group_jid_to_name = {jid: name for jid, name in groups_list}
 
-    print("\nAvailable groups:")
-    for i, (jid, name) in enumerate(groups_list, 1):
-        print(f"{i}. {name} ({jid})")
-        
-    # --- Destination Group Selection --- 
-    destination_group_jid = None
-    destination_group_name = None
-    while not destination_group_jid:
-        try:
-            raw_dest_selection = input("\nEnter the number of the group to FORWARD MESSAGES TO: ").strip()
-            dest_idx = int(raw_dest_selection) - 1
-            if 0 <= dest_idx < len(groups_list):
-                destination_group_jid = groups_list[dest_idx][0]
-                destination_group_name = groups_list[dest_idx][1]
-                print(f"  Messages will be forwarded to: {destination_group_name} ({destination_group_jid})")
-            else:
-                print(f"Error: Invalid group number. Please enter a number between 1 and {len(groups_list)}.")
-        except ValueError:
-            print("Error: Invalid input. Please enter a single number.")
-        except Exception as e:
-             print(f"An unexpected error during destination group selection: {e}")
+    destination_group_name = group_jid_to_name.get(destination_group_jid, destination_group_jid)
+    print(f"  Messages will be forwarded to: {destination_group_name} ({destination_group_jid})")
 
-    # --- Source Group Selection --- 
-    selected_source_group_jids = []
-    while not selected_source_group_jids:
-        try:
-            raw_selection = input("\nEnter the number(s) of the group(s) to SCAN FOR LINKS (comma-separated): ").strip()
-            selected_indices = [int(x.strip()) - 1 for x in raw_selection.split(',') if x.strip()]
-            valid_selection = True
-            temp_selected_jids = []
-            print("  Scanning the following groups for links:")
-            for idx in selected_indices:
-                if 0 <= idx < len(groups_list):
-                    source_jid = groups_list[idx][0]
-                    source_name = groups_list[idx][1]
-                    temp_selected_jids.append(source_jid)
-                    print(f"  - {source_name} ({source_jid})")
-                else:
-                    print(f"Error: Invalid group number {idx + 1} in source list.")
-                    valid_selection = False
-                    temp_selected_jids = [] # Reset list on error
-                    break
-            if valid_selection and temp_selected_jids:
-                selected_source_group_jids = temp_selected_jids
-            elif valid_selection:
-                 print("Error: No source groups selected.")
-        except ValueError:
-            print("Error: Invalid input. Please enter numbers separated by commas.")
-        except Exception as e:
-             print(f"An unexpected error during source group selection: {e}")
-             
-    # print(f"\nSelected source group JIDs: {selected_source_group_jids}") # Redundant now
+    print("  Scanning the following groups for links:")
+    for source_jid in selected_source_group_jids:
+        source_name_display = group_jid_to_name.get(source_jid, source_jid)
+        print(f"  - {source_name_display} ({source_jid})")
 
-    # --- Interactive Date Selection --- 
+
+    # --- Date Selection (Automated for "Today") ---
     today_str = datetime.now().strftime('%Y-%m-%d')
-    start_date_str = None
-    while True:
-        start_date_input = input(f"\nEnter start date (YYYY-MM-DD), 'today', or leave empty [default: no limit]: ").strip().lower()
-        if not start_date_input: start_date_str = None; break
-        elif start_date_input == 'today': start_date_str = today_str; print(f"  Using start date: {start_date_str}"); break
-        else:
-            try: datetime.strptime(start_date_input, '%Y-%m-%d'); start_date_str = start_date_input; break
-            except ValueError: print("Invalid format. Please use YYYY-MM-DD, 'today', or leave empty.")
-            
-    end_date_str = None
-    while True:
-        end_date_input = input(f"Enter end date (YYYY-MM-DD), 'today', or leave empty [default: no limit]: ").strip().lower()
-        if not end_date_input: end_date_str = None; break
-        elif end_date_input == 'today': end_date_str = today_str; print(f"  Using end date: {end_date_str}"); break
-        else:
-            try: datetime.strptime(end_date_input, '%Y-%m-%d'); end_date_str = end_date_input; break
-            except ValueError: print("Invalid format. Please use YYYY-MM-DD, 'today', or leave empty.")
-            
-    # --- Message Finding, Metadata Fetching, and Forwarding --- 
+    start_date_str = today_str
+    end_date_str = today_str # The script logic correctly handles end_date to include the whole day
+    print(f"\nProcessing messages for date: {today_str}")
+    # --- End Date Selection ---
+
+    # --- Message Finding, Metadata Fetching, and Forwarding ---
     total_processed = 0
     total_forwarded_with_preview = 0
     total_forwarded_text_only = 0
     
     print("\nStarting message search and processing...")
     for group_jid in selected_source_group_jids:
-        print(f"--- Processing source group {group_jid} ---")
+        # --- Get Source Group Name ---
+        source_group_name = group_jid_to_name.get(group_jid, group_jid) # Fallback to JID if name somehow missing
+        print(f"--- Checking source group: {source_group_name} ({group_jid}) ---")
         
-        # Fetch all messages for the group/date first
+        # --- Fetch all messages for the group/date first --- 
         conn = None
         all_messages_in_range = []
         try:
@@ -352,104 +324,123 @@ def main():
             
         except sqlite3.Error as e:
             print(f"  Database error fetching messages for source group {group_jid}: {e}")
+            # If we can't fetch messages, we definitely can't forward any or send a header
             continue # Skip to next group if DB error occurs
         finally:
             if conn:
                 conn.close()
                 
-        # Process messages found in the source group
-        # Unpack new columns from the fetched data
-        for message_content, message_timestamp, is_reply, quoted_id, quoted_sender_jid in all_messages_in_range:
-            total_processed += 1
-            print(f"\nProcessing message from {message_timestamp}...")
-            
-            # --- DEBUG: Print raw reply info from DB --- 
-            print(f"    DEBUG: is_reply={is_reply} (type: {type(is_reply)}), quoted_id='{quoted_id}', quoted_sender='{quoted_sender_jid}'")
-            # --- END DEBUG --- 
-            
-            links = extract_links(message_content)
-            
-            if not links:
-                 # --- DEBUG: Add reason for skipping --- 
-                 print("    DEBUG: Skipping message - No links found.")
-                 # --- END DEBUG --- 
-                 continue
-
-            # --- DEBUG: Print link found --- 
-            first_link = links[0]
-            print(f"    DEBUG: Found link: {first_link}")
-            # --- END DEBUG --- 
-            
-            # --- Get Reply Context --- 
-            reply_prefix = "" # Start with empty prefix
-            if is_reply and quoted_id:
-                 # --- DEBUG: Entering reply processing --- 
-                 print(f"    DEBUG: Attempting to process as reply.")
-                 # --- END DEBUG --- 
-                 print(f"    Message is a reply to ID: {quoted_id} from {quoted_sender_jid}")
-                 # Fetch the quoted message text
-                 quoted_sender_display = quoted_sender_jid.split('@')[0] if quoted_sender_jid else "Unknown"
-                 _q_sender, quoted_text = get_quoted_message_text(args.db_path, quoted_id, group_jid) # Fetch from the same group JID
-                 if quoted_text:
-                     # Use full quoted text, remove newline replacement and limit
-                     # snippet = quoted_text.strip().replace('\n', ' ')[:60] # Limit length
-                     full_quoted = quoted_text.strip() # Keep original newlines if desired, or replace with space
-                     # reply_prefix = f"[Replying to {quoted_sender_display}: \"{snippet}...\"]\n---\n" 
-                     reply_prefix = f"[Replying to {quoted_sender_display}: \"{full_quoted}\"]\n---\n"
-                 else:
-                     reply_prefix = f"[Replying to {quoted_sender_display}]\n---\n" # Prefix even if text isn't found
-            elif is_reply:
-                 # --- DEBUG: is_reply is true but quoted_id is missing --- 
-                 print(f"    DEBUG: is_reply is true, but quoted_id is missing/empty ('{quoted_id}'). Cannot fetch context.")
-                 # --- END DEBUG --- 
-            else:
-                 # --- DEBUG: Not a reply --- 
-                 print(f"    DEBUG: Not a reply (is_reply={is_reply}).")
-                 # --- END DEBUG --- 
-                 pass # Not a reply
-            # --- End Get Reply Context ---
-            
-            # Fetch metadata for preview
-            metadata = fetch_link_metadata(first_link)
-            temp_image_path = None
-            success = False
-            
-            try: # Use try/finally to ensure temp file cleanup
-                if metadata and metadata.get('image_url'):
-                    temp_image_path = download_image_temp(metadata['image_url'])
-                    
-                    if temp_image_path:
-                        # Construct text message with metadata AND reply prefix
-                        # preview_text = f"{metadata.get('title', '')}\n{metadata.get('description', '')}\n{first_link}".strip()
-                        # CHANGE: Always use original message content for the text part, even with image
-                        final_text_to_send = reply_prefix + message_content # Prepend reply info
-                        # Send image + text to the DESTINATION group
-                        success = send_whatsapp_message(destination_group_jid, final_text_to_send, media_path=temp_image_path)
-                        if success: total_forwarded_with_preview += 1
+        # --- Filter messages to only include those with links --- 
+        messages_with_links = []
+        for msg_data in all_messages_in_range:
+            message_content = msg_data[0] # Content is the first element
+            if extract_links(message_content):
+                messages_with_links.append(msg_data)
+                
+        print(f"  Found {len(messages_with_links)} messages containing links.")
+        
+        # --- Conditionally Send Header and Process Link Messages --- 
+        if messages_with_links: # Only proceed if there are links to forward
+            # Send Header Message for the Group (with bold name)
+            # header_message = f"--- Following links forwarded from group: *{source_group_name}* ---"
+            # Try simpler format without --- to see if bold works
+            header_message = f"Links forwarded from group: *{source_group_name}*"
+            print(f"  Sending header message to {destination_group_name}: '{header_message}'") # Log the exact header being sent
+            send_whatsapp_message(destination_group_jid, header_message)
+            # Add a small delay so the header stands out
+            print("    Waiting 1 second after header...")
+            time.sleep(1.0) 
+        
+            # Process ONLY the messages that contain links
+            # Unpack new columns from the filtered data
+            for message_content, message_timestamp, is_reply, quoted_id, quoted_sender_jid in messages_with_links:
+                total_processed += 1 # Increment here as we are now actually processing it
+                print(f"\nProcessing message from {message_timestamp}...")
+                
+                # --- DEBUG: Print raw reply info from DB --- 
+                # This debug line might be less useful now that we pre-filter, but keep for now
+                print(f"    DEBUG: is_reply={is_reply} (type: {type(is_reply)}), quoted_id='{quoted_id}', quoted_sender='{quoted_sender_jid}'")
+                # --- END DEBUG --- 
+                
+                # Links are guaranteed to exist here because we filtered
+                links = extract_links(message_content) 
+                first_link = links[0]
+                print(f"    DEBUG: Found link: {first_link}") # Keep this debug line
+                
+                # --- Get Reply Context --- 
+                reply_prefix = "" # Start with empty prefix
+                if is_reply and quoted_id:
+                     # --- DEBUG: Entering reply processing --- 
+                     print(f"    DEBUG: Attempting to process as reply.")
+                     # --- END DEBUG --- 
+                     print(f"    Message is a reply to ID: {quoted_id} from {quoted_sender_jid}")
+                     # Fetch the quoted message text
+                     quoted_sender_display = quoted_sender_jid.split('@')[0] if quoted_sender_jid else "Unknown"
+                     _q_sender, quoted_text = get_quoted_message_text(args.db_path, quoted_id, group_jid) # Fetch from the same group JID
+                     if quoted_text:
+                         # Use full quoted text, remove newline replacement and limit
+                         # snippet = quoted_text.strip().replace('\n', ' ')[:60] # Limit length
+                         full_quoted = quoted_text.strip() # Keep original newlines if desired, or replace with space
+                         # reply_prefix = f"[Replying to {quoted_sender_display}: \"{snippet}...\"]\n---\n" 
+                         reply_prefix = f"[Replying to {quoted_sender_display}: \"{full_quoted}\"]\n---\n"
+                     else:
+                         reply_prefix = f"[Replying to {quoted_sender_display}]\n---\n" # Prefix even if text isn't found
+                elif is_reply:
+                     # --- DEBUG: is_reply is true but quoted_id is missing --- 
+                     print(f"    DEBUG: is_reply is true, but quoted_id is missing/empty ('{quoted_id}'). Cannot fetch context.")
+                     # --- END DEBUG --- 
+                else:
+                     # --- DEBUG: Not a reply --- 
+                     print(f"    DEBUG: Not a reply (is_reply={is_reply}).")
+                     # --- END DEBUG --- 
+                     pass # Not a reply
+                # --- End Get Reply Context ---
+                
+                # Fetch metadata for preview
+                metadata = fetch_link_metadata(first_link)
+                temp_image_path = None
+                success = False
+                
+                try: # Use try/finally to ensure temp file cleanup
+                    if metadata and metadata.get('image_url'):
+                        temp_image_path = download_image_temp(metadata['image_url'])
+                        
+                        if temp_image_path:
+                            # Construct text message with metadata AND reply prefix
+                            # preview_text = f"{metadata.get('title', '')}\n{metadata.get('description', '')}\n{first_link}".strip()
+                            # CHANGE: Always use original message content for the text part, even with image
+                            final_text_to_send = reply_prefix + message_content # Prepend reply info
+                            # Send image + text to the DESTINATION group
+                            success = send_whatsapp_message(destination_group_jid, final_text_to_send, media_path=temp_image_path)
+                            if success: total_forwarded_with_preview += 1
+                        else:
+                            print("    Image download failed, falling back to text only.")
+                            final_text_to_send = reply_prefix + message_content # Prepend reply info to original content
+                            success = send_whatsapp_message(destination_group_jid, final_text_to_send)
+                            if success: total_forwarded_text_only += 1
                     else:
-                        print("    Image download failed, falling back to text only.")
+                        print("    No image metadata found or fetch failed, sending text only.")
                         final_text_to_send = reply_prefix + message_content # Prepend reply info to original content
                         success = send_whatsapp_message(destination_group_jid, final_text_to_send)
                         if success: total_forwarded_text_only += 1
-                else:
-                    print("    No image metadata found or fetch failed, sending text only.")
-                    final_text_to_send = reply_prefix + message_content # Prepend reply info to original content
-                    success = send_whatsapp_message(destination_group_jid, final_text_to_send)
-                    if success: total_forwarded_text_only += 1
-            finally:
-                 # Clean up temporary image file if it exists
-                 if temp_image_path and os.path.exists(temp_image_path):
-                     try:
-                         os.remove(temp_image_path)
-                         print(f"    Cleaned up temporary file: {temp_image_path}")
-                     except OSError as e:
-                         print(f"    Error cleaning up temporary file {temp_image_path}: {e}")
+                finally:
+                     # Clean up temporary image file if it exists
+                     if temp_image_path and os.path.exists(temp_image_path):
+                         try:
+                             os.remove(temp_image_path)
+                             print(f"    Cleaned up temporary file: {temp_image_path}")
+                         except OSError as e:
+                             print(f"    Error cleaning up temporary file {temp_image_path}: {e}")
 
-            # Delay between processing each message
-            print(f"    Waiting for {args.delay} seconds...")
-            time.sleep(args.delay)
-            
-        print(f"--- Finished processing source group {group_jid} ---")
+                # Delay between processing each message
+                print(f"    Waiting for {args.delay} seconds...")
+                time.sleep(args.delay)
+            # End of loop for messages_with_links
+            print(f"--- Finished processing source group {source_group_name} ({group_jid}) ---") # Use name here too
+        else:
+            # If no messages with links were found, print a message and move to the next group
+            print(f"  No link-containing messages found for group {source_group_name}. Skipping header and forwarding.")
+            # No need to print "Finished processing" if nothing was processed
 
     print(f"\nWorkflow complete.")
     print(f"  Messages processed: {total_processed}")
