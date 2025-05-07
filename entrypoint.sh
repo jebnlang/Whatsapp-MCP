@@ -8,4 +8,4 @@
 # Start the Go WhatsApp bridge
 echo "Starting WhatsApp Bridge..."
 # The bridge will create/use files in /app/store
-./whatsapp-bridge 
+/app/whatsapp-bridge 
