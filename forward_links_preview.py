@@ -14,8 +14,8 @@ import shutil # For saving image data
 
 # --- Configuration ---
 # RECIPIENT_JID = "972526060403@s.whatsapp.net" # Removed hardcoded recipient
-WHATSAPP_API_BASE_URL = os.getenv("WHATSAPP_API_BASE_URL", "http://localhost:8080/api") # Get from Env
-DEFAULT_DELAY = float(os.getenv("DEFAULT_DELAY", "3.0")) # Increased default delay due to web requests
+WHATSAPP_API_BASE_URL = "http://localhost:8080/api"
+DEFAULT_DELAY = 3.0 # Increased default delay due to web requests
 MAX_WHATSAPP_MESSAGE_LENGTH = 1500 # For warning only
 REQUESTS_TIMEOUT = 10 # Timeout for fetching URLs/images
 # Mimic a browser User-Agent
@@ -235,61 +235,95 @@ def get_quoted_message_text(db_path, quoted_id, chat_jid):
 def main():
     # Update description
     parser = argparse.ArgumentParser(description="Finds links in source WhatsApp groups/dates, attempts to fetch preview data, and forwards to a selected destination group.")
-    # DB Path can still be an argument for local testing, but will default to env var
-    parser.add_argument("--db-path", type=str, default=os.getenv("WHATSAPP_DB_PATH", "store/messages.db"), help="Path to the WhatsApp messages.db file.")
+    parser.add_argument("--db-path", type=str, required=True, help="Path to the WhatsApp messages.db file.")
     parser.add_argument("--delay", type=float, default=DEFAULT_DELAY, help=f"Delay between forwarding messages (default: {DEFAULT_DELAY}).")
     args = parser.parse_args()
 
-    # --- Get Configuration from Environment Variables ---
-    destination_group_jid = os.getenv("DESTINATION_GROUP_JID")
-    source_group_jids_str = os.getenv("SOURCE_GROUP_JIDS")
-
-    if not destination_group_jid:
-        print("Error: DESTINATION_GROUP_JID environment variable not set.")
-        sys.exit(1)
-    if not source_group_jids_str:
-        print("Error: SOURCE_GROUP_JIDS environment variable not set.")
-        sys.exit(1)
-
-    selected_source_group_jids = [jid.strip() for jid in source_group_jids_str.split(',') if jid.strip()]
-    if not selected_source_group_jids:
-        print("Error: No valid source group JIDs found in SOURCE_GROUP_JIDS environment variable.")
-        sys.exit(1)
-
-    print(f"Configuration:")
-    print(f"  Database Path: {args.db_path}")
-    print(f"  Destination Group JID: {destination_group_jid}")
-    print(f"  Source Group JIDs: {selected_source_group_jids}")
-    print(f"  Delay: {args.delay}s")
-    print(f"  API Base URL: {WHATSAPP_API_BASE_URL}")
-
-
-    # --- Get Groups (for JID to Name mapping) ---
-    print("\nFetching available groups for name mapping...")
+    # --- Get Groups --- 
+    print("Fetching available groups...")
     groups_list = get_groups(args.db_path)
     if not groups_list:
-        print("Warning: No groups found in the database for name mapping. Using JIDs as names.")
-        group_jid_to_name = {}
-    else:
-        group_jid_to_name = {jid: name for jid, name in groups_list}
+        print("Error: No groups found in the database.")
+        return
 
-    destination_group_name = group_jid_to_name.get(destination_group_jid, destination_group_jid)
-    print(f"  Messages will be forwarded to: {destination_group_name} ({destination_group_jid})")
+    # --- Create a JID to Name mapping for later lookup ---
+    group_jid_to_name = {jid: name for jid, name in groups_list}
+    # --- End JID mapping ---
 
-    print("  Scanning the following groups for links:")
-    for source_jid in selected_source_group_jids:
-        source_name_display = group_jid_to_name.get(source_jid, source_jid)
-        print(f"  - {source_name_display} ({source_jid})")
+    print("\nAvailable groups:")
+    for i, (jid, name) in enumerate(groups_list, 1):
+        print(f"{i}. {name} ({jid})")
+        
+    # --- Destination Group Selection --- 
+    destination_group_jid = None
+    destination_group_name = None
+    while not destination_group_jid:
+        try:
+            raw_dest_selection = input("\nEnter the number of the group to FORWARD MESSAGES TO: ").strip()
+            dest_idx = int(raw_dest_selection) - 1
+            if 0 <= dest_idx < len(groups_list):
+                destination_group_jid = groups_list[dest_idx][0]
+                destination_group_name = groups_list[dest_idx][1]
+                print(f"  Messages will be forwarded to: {destination_group_name} ({destination_group_jid})")
+            else:
+                print(f"Error: Invalid group number. Please enter a number between 1 and {len(groups_list)}.")
+        except ValueError:
+            print("Error: Invalid input. Please enter a single number.")
+        except Exception as e:
+             print(f"An unexpected error during destination group selection: {e}")
 
+    # --- Source Group Selection --- 
+    selected_source_group_jids = []
+    while not selected_source_group_jids:
+        try:
+            raw_selection = input("\nEnter the number(s) of the group(s) to SCAN FOR LINKS (comma-separated): ").strip()
+            selected_indices = [int(x.strip()) - 1 for x in raw_selection.split(',') if x.strip()]
+            valid_selection = True
+            temp_selected_jids = []
+            print("  Scanning the following groups for links:")
+            for idx in selected_indices:
+                if 0 <= idx < len(groups_list):
+                    source_jid = groups_list[idx][0]
+                    source_name = groups_list[idx][1]
+                    temp_selected_jids.append(source_jid)
+                    print(f"  - {source_name} ({source_jid})")
+                else:
+                    print(f"Error: Invalid group number {idx + 1} in source list.")
+                    valid_selection = False
+                    temp_selected_jids = [] # Reset list on error
+                    break
+            if valid_selection and temp_selected_jids:
+                selected_source_group_jids = temp_selected_jids
+            elif valid_selection:
+                 print("Error: No source groups selected.")
+        except ValueError:
+            print("Error: Invalid input. Please enter numbers separated by commas.")
+        except Exception as e:
+             print(f"An unexpected error during source group selection: {e}")
+             
+    # print(f"\nSelected source group JIDs: {selected_source_group_jids}") # Redundant now
 
-    # --- Date Selection (Automated for "Today") ---
+    # --- Interactive Date Selection --- 
     today_str = datetime.now().strftime('%Y-%m-%d')
-    start_date_str = today_str
-    end_date_str = today_str # The script logic correctly handles end_date to include the whole day
-    print(f"\nProcessing messages for date: {today_str}")
-    # --- End Date Selection ---
-
-    # --- Message Finding, Metadata Fetching, and Forwarding ---
+    start_date_str = None
+    while True:
+        start_date_input = input(f"\nEnter start date (YYYY-MM-DD), 'today', or leave empty [default: no limit]: ").strip().lower()
+        if not start_date_input: start_date_str = None; break
+        elif start_date_input == 'today': start_date_str = today_str; print(f"  Using start date: {start_date_str}"); break
+        else:
+            try: datetime.strptime(start_date_input, '%Y-%m-%d'); start_date_str = start_date_input; break
+            except ValueError: print("Invalid format. Please use YYYY-MM-DD, 'today', or leave empty.")
+            
+    end_date_str = None
+    while True:
+        end_date_input = input(f"Enter end date (YYYY-MM-DD), 'today', or leave empty [default: no limit]: ").strip().lower()
+        if not end_date_input: end_date_str = None; break
+        elif end_date_input == 'today': end_date_str = today_str; print(f"  Using end date: {end_date_str}"); break
+        else:
+            try: datetime.strptime(end_date_input, '%Y-%m-%d'); end_date_str = end_date_input; break
+            except ValueError: print("Invalid format. Please use YYYY-MM-DD, 'today', or leave empty.")
+            
+    # --- Message Finding, Metadata Fetching, and Forwarding --- 
     total_processed = 0
     total_forwarded_with_preview = 0
     total_forwarded_text_only = 0
