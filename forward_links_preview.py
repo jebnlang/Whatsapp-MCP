@@ -13,15 +13,146 @@ import tempfile # For temporary image files
 import shutil # For saving image data
 
 # --- Configuration ---
-# RECIPIENT_JID = "972526060403@s.whatsapp.net" # Removed hardcoded recipient
+# Remove hardcoded recipient, will use environment variable
 WHATSAPP_API_BASE_URL = "http://localhost:8080/api"
 DEFAULT_DELAY = 3.0 # Increased default delay due to web requests
 MAX_WHATSAPP_MESSAGE_LENGTH = 1500 # For warning only
 REQUESTS_TIMEOUT = 10 # Timeout for fetching URLs/images
+LAST_RUN_FILE = "last_forward_run.txt"
+
 # Mimic a browser User-Agent
 REQUESTS_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
 }
+
+# --- Timestamp Tracking Functions ---
+
+def get_last_run_time():
+    """Get timestamp of last successful run, or 24 hours ago if first run."""
+    try:
+        if os.path.exists(LAST_RUN_FILE):
+            with open(LAST_RUN_FILE, 'r') as f:
+                timestamp_str = f.read().strip()
+                last_run = datetime.fromisoformat(timestamp_str)
+                print(f"Found last run timestamp: {last_run}")
+                return last_run
+    except Exception as e:
+        print(f"Warning: Could not read last run time: {e}")
+    
+    # Fallback: 24 hours ago for first run
+    fallback_time = datetime.now() - timedelta(days=1)
+    print(f"No previous run found, using fallback time: {fallback_time}")
+    return fallback_time
+
+def update_last_run_time(timestamp=None):
+    """Update the last run timestamp file."""
+    if timestamp is None:
+        timestamp = datetime.now()
+    
+    try:
+        with open(LAST_RUN_FILE, 'w') as f:
+            f.write(timestamp.isoformat())
+        print(f"Updated last run time to: {timestamp}")
+        return True
+    except Exception as e:
+        print(f"Warning: Could not update last run time: {e}")
+        return False
+
+# --- Group Resolution Functions ---
+
+def find_group_by_name(db_path, group_name):
+    """Find a group JID by its name (partial match)."""
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT 
+                jid,
+                name
+            FROM chats
+            WHERE jid LIKE '%@g.us'
+            AND LOWER(name) LIKE LOWER(?)
+            ORDER BY name
+        """, (f"%{group_name}%",))
+        
+        groups = cursor.fetchall()
+        return groups
+        
+    except sqlite3.Error as e:
+        print(f"Database error: {e}")
+        return []
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+def resolve_group_names_to_jids(db_path, group_names):
+    """
+    Resolve a list of group names to their JIDs.
+    Returns a list of (jid, name) tuples for found groups.
+    """
+    resolved_groups = []
+    
+    for group_name in group_names:
+        group_name = group_name.strip()
+        print(f"Resolving group name: '{group_name}'")
+        
+        matches = find_group_by_name(db_path, group_name)
+        
+        if not matches:
+            print(f"  Warning: No group found matching '{group_name}'")
+            continue
+        
+        if len(matches) == 1:
+            jid, name = matches[0]
+            print(f"  Found: {name} -> {jid}")
+            resolved_groups.append((jid, name))
+        else:
+            print(f"  Multiple groups found matching '{group_name}':")
+            for jid, name in matches:
+                print(f"    - {name} ({jid})")
+            
+            # Use the first match (alphabetically first)
+            jid, name = matches[0]
+            print(f"  Using first match: {name} -> {jid}")
+            resolved_groups.append((jid, name))
+    
+    return resolved_groups
+
+def resolve_recipient_to_jid(recipient_input, db_path):
+    """
+    Resolves recipient input to a JID.
+    - If recipient looks like a JID (contains @), return as-is
+    - If recipient looks like a phone number (digits only), convert to JID
+    - If recipient is a group name, resolve to group JID
+    """
+    if not recipient_input:
+        return None
+    
+    recipient_input = recipient_input.strip()
+    
+    # If already a JID, return as-is
+    if "@" in recipient_input:
+        print(f"Recipient appears to be a JID: {recipient_input}")
+        return recipient_input
+    
+    # If it's all digits (phone number), convert to JID
+    if recipient_input.replace("+", "").replace("-", "").replace(" ", "").isdigit():
+        phone_jid = recipient_input.replace("+", "").replace("-", "").replace(" ", "") + "@s.whatsapp.net"
+        print(f"Converted phone number to JID: {phone_jid}")
+        return phone_jid
+    
+    # Otherwise, treat as group name and try to resolve it
+    print(f"Attempting to resolve group name '{recipient_input}' to JID...")
+    resolved_groups = resolve_group_names_to_jids(db_path, [recipient_input])
+    
+    if resolved_groups:
+        jid, name = resolved_groups[0]
+        print(f"Resolved recipient group: {name} -> {jid}")
+        return jid
+    else:
+        print(f"Could not resolve recipient '{recipient_input}' to a valid JID")
+        return None
 
 # --- Database and Helper Functions ---
 
@@ -237,8 +368,25 @@ def main():
     parser = argparse.ArgumentParser(description="Finds links in source WhatsApp groups/dates, attempts to fetch preview data, and forwards to a selected destination group.")
     parser.add_argument("--db-path", type=str, required=True, help="Path to the WhatsApp messages.db file.")
     parser.add_argument("--delay", type=float, default=DEFAULT_DELAY, help=f"Delay between forwarding messages (default: {DEFAULT_DELAY}).")
+    parser.add_argument("--non-interactive", action="store_true", help="Force non-interactive mode using environment variables.")
     args = parser.parse_args()
 
+    # Check if we should run in non-interactive mode
+    # Either --non-interactive flag is set OR environment variables are present
+    has_env_vars = os.getenv("WHATSAPP_FORWARD_RECIPIENT") and os.getenv("WHATSAPP_SOURCE_GROUPS")
+    
+    if args.non_interactive or has_env_vars:
+        print("🤖 Running in non-interactive mode...")
+        success = run_non_interactive_mode(args.db_path, args.delay)
+        if success:
+            print("✅ Non-interactive execution completed successfully!")
+        else:
+            print("❌ Non-interactive execution failed!")
+            sys.exit(1)
+        return
+
+    print("👤 Running in interactive mode...")
+    
     # --- Get Groups --- 
     print("Fetching available groups...")
     groups_list = get_groups(args.db_path)
@@ -481,6 +629,210 @@ def main():
     print(f"  Forwarded with image+text attempt: {total_forwarded_with_preview}")
     print(f"  Forwarded with text only fallback: {total_forwarded_text_only}")
     print(f"  (All forwards sent to group: {destination_group_name} [{destination_group_jid}])")
+
+def run_non_interactive_mode(db_path, delay):
+    """
+    Run in non-interactive mode using environment variables and timestamp tracking.
+    """
+    print("Running in non-interactive mode using environment variables...")
+    
+    # Get recipient from environment variable
+    recipient_env = os.getenv("WHATSAPP_FORWARD_RECIPIENT")
+    if not recipient_env:
+        print("Error: WHATSAPP_FORWARD_RECIPIENT environment variable is not set.")
+        print("Please set it to a phone number, group name, or JID.")
+        return False
+    
+    print(f"Recipient from env var: {recipient_env}")
+    
+    # Resolve recipient to JID
+    destination_group_jid = resolve_recipient_to_jid(recipient_env, db_path)
+    if not destination_group_jid:
+        print(f"Error: Could not resolve recipient '{recipient_env}' to a valid JID.")
+        return False
+    
+    destination_group_name = recipient_env  # Use original input as display name
+    print(f"Messages will be forwarded to: {destination_group_name} ({destination_group_jid})")
+    
+    # Get source groups from environment variable
+    source_groups_env = os.getenv("WHATSAPP_SOURCE_GROUPS")
+    if not source_groups_env:
+        print("Error: WHATSAPP_SOURCE_GROUPS environment variable is not set.")
+        print("Please set it to a comma-separated list of group names.")
+        return False
+    
+    # Parse group names
+    group_names = [name.strip() for name in source_groups_env.split(',') if name.strip()]
+    if not group_names:
+        print("Error: No valid group names found in WHATSAPP_SOURCE_GROUPS.")
+        return False
+    
+    print(f"Source groups from env var: {group_names}")
+    
+    # Resolve group names to JIDs
+    source_groups_data = resolve_group_names_to_jids(db_path, group_names)
+    
+    if not source_groups_data:
+        print("Error: Could not resolve any group names to valid groups.")
+        return False
+    
+    print(f"\nResolved {len(source_groups_data)} source groups:")
+    for jid, name in source_groups_data:
+        print(f"- {name} ({jid})")
+    
+    # Get time range using timestamp tracking
+    start_datetime = get_last_run_time()
+    end_datetime = datetime.now()
+    
+    print(f"\nTime range for this run:")
+    print(f"  Start: {start_datetime}")
+    print(f"  End: {end_datetime}")
+    
+    # Create a JID to Name mapping
+    group_jid_to_name = {jid: name for jid, name in source_groups_data}
+    selected_source_group_jids = [jid for jid, name in source_groups_data]
+    
+    # Process messages (using existing logic from main() but with datetime objects)
+    total_processed = 0
+    total_forwarded_with_preview = 0
+    total_forwarded_text_only = 0
+    
+    print("\nStarting message search and processing...")
+    for group_jid in selected_source_group_jids:
+        source_group_name = group_jid_to_name.get(group_jid, group_jid)
+        print(f"--- Checking source group: {source_group_name} ({group_jid}) ---")
+        
+        # Fetch all messages for the group/time range
+        conn = None
+        all_messages_in_range = []
+        try:
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            
+            # Modified query to use datetime objects
+            query = """ 
+                SELECT content, timestamp, is_reply, quoted_message_id, quoted_sender 
+                FROM messages 
+                WHERE chat_jid = ? AND content IS NOT NULL 
+                AND datetime(timestamp) >= datetime(?) 
+                AND datetime(timestamp) < datetime(?) 
+                ORDER BY timestamp
+            """ 
+            params = [group_jid, start_datetime.isoformat(), end_datetime.isoformat()]
+            
+            cursor.execute(query, params)
+            all_messages_in_range = cursor.fetchall()
+            print(f"  Found {len(all_messages_in_range)} total messages in time range for this group.")
+            
+        except sqlite3.Error as e:
+            print(f"  Database error fetching messages for source group {group_jid}: {e}")
+            continue
+        finally:
+            if conn:
+                conn.close()
+                
+        # Filter messages to only include those with links
+        messages_with_links = []
+        for msg_data in all_messages_in_range:
+            message_content = msg_data[0]
+            if extract_links(message_content):
+                messages_with_links.append(msg_data)
+                
+        print(f"  Found {len(messages_with_links)} messages containing links.")
+        
+        # Process messages with links (reusing existing logic)
+        if messages_with_links:
+            # Send Header Message for the Group
+            header_message = f"Links forwarded from group: *{source_group_name}*"
+            print(f"  Sending header message to {destination_group_name}: '{header_message}'")
+            send_whatsapp_message(destination_group_jid, header_message)
+            print("    Waiting 1 second after header...")
+            time.sleep(1.0) 
+        
+            # Process ONLY the messages that contain links
+            for message_content, message_timestamp, is_reply, quoted_id, quoted_sender_jid in messages_with_links:
+                total_processed += 1
+                print(f"\nProcessing message from {message_timestamp}...")
+                
+                print(f"    DEBUG: is_reply={is_reply} (type: {type(is_reply)}), quoted_id='{quoted_id}', quoted_sender='{quoted_sender_jid}'")
+                
+                links = extract_links(message_content) 
+                first_link = links[0]
+                print(f"    DEBUG: Found link: {first_link}")
+                
+                # Get Reply Context
+                reply_prefix = ""
+                if is_reply and quoted_id:
+                     print(f"    DEBUG: Attempting to process as reply.")
+                     print(f"    Message is a reply to ID: {quoted_id} from {quoted_sender_jid}")
+                     quoted_sender_display = quoted_sender_jid.split('@')[0] if quoted_sender_jid else "Unknown"
+                     _q_sender, quoted_text = get_quoted_message_text(db_path, quoted_id, group_jid)
+                     if quoted_text:
+                         full_quoted = quoted_text.strip()
+                         reply_prefix = f"[Replying to {quoted_sender_display}: \"{full_quoted}\"]\n---\n"
+                     else:
+                         reply_prefix = f"[Replying to {quoted_sender_display}]\n---\n"
+                elif is_reply:
+                     print(f"    DEBUG: is_reply is true, but quoted_id is missing/empty ('{quoted_id}'). Cannot fetch context.")
+                else:
+                     print(f"    DEBUG: Not a reply (is_reply={is_reply}).")
+                
+                # Fetch metadata for preview
+                metadata = fetch_link_metadata(first_link)
+                temp_image_path = None
+                success = False
+                
+                try:
+                    if metadata and metadata.get('image_url'):
+                        temp_image_path = download_image_temp(metadata['image_url'])
+                        
+                        if temp_image_path:
+                            final_text_to_send = reply_prefix + message_content
+                            success = send_whatsapp_message(destination_group_jid, final_text_to_send, media_path=temp_image_path)
+                            if success: total_forwarded_with_preview += 1
+                        else:
+                            print("    Image download failed, falling back to text only.")
+                            final_text_to_send = reply_prefix + message_content
+                            success = send_whatsapp_message(destination_group_jid, final_text_to_send)
+                            if success: total_forwarded_text_only += 1
+                    else:
+                        print("    No image metadata found or fetch failed, sending text only.")
+                        final_text_to_send = reply_prefix + message_content
+                        success = send_whatsapp_message(destination_group_jid, final_text_to_send)
+                        if success: total_forwarded_text_only += 1
+                finally:
+                     # Clean up temporary image file if it exists
+                     if temp_image_path and os.path.exists(temp_image_path):
+                         try:
+                             os.remove(temp_image_path)
+                             print(f"    Cleaned up temporary file: {temp_image_path}")
+                         except OSError as e:
+                             print(f"    Error cleaning up temporary file {temp_image_path}: {e}")
+
+                # Delay between processing each message
+                print(f"    Waiting for {delay} seconds...")
+                time.sleep(delay)
+                
+            print(f"--- Finished processing source group {source_group_name} ({group_jid}) ---")
+        else:
+            print(f"  No link-containing messages found for group {source_group_name}. Skipping header and forwarding.")
+
+    print(f"\nWorkflow complete.")
+    print(f"  Messages processed: {total_processed}")
+    print(f"  Forwarded with image+text attempt: {total_forwarded_with_preview}")
+    print(f"  Forwarded with text only fallback: {total_forwarded_text_only}")
+    print(f"  (All forwards sent to: {destination_group_name} [{destination_group_jid}])")
+    
+    # Update timestamp for next run
+    if total_processed > 0:
+        if update_last_run_time(end_datetime):
+            print(f"Successfully updated last run timestamp for next execution.")
+        else:
+            print("Warning: Failed to update last run timestamp.")
+    else:
+        print("No messages processed, not updating last run timestamp.")
+    
+    return True
 
 if __name__ == "__main__":
     main() 

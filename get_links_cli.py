@@ -10,8 +10,13 @@ import requests # Added for fetching URL content
 import openai # Added for AI analysis
 
 # --- OpenAI API Setup ---
-# WARNING: Hardcoding keys is insecure. Use environment variables in production.
-OPENAI_API_KEY = "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"
+# Use environment variable for API key instead of hardcoding
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+if not OPENAI_API_KEY:
+    print("Error: OPENAI_API_KEY environment variable is not set.")
+    print("Please set your OpenAI API key as an environment variable.")
+    exit(1)
 
 try:
     client = openai.OpenAI(api_key=OPENAI_API_KEY)
@@ -448,6 +453,142 @@ def main():
         print(f"Enriched links data saved successfully to {output_file}")
     except Exception as e:
         print(f"Error saving enriched data to file {output_file}: {e}")
+
+def resolve_group_names_to_jids(db_path, group_names):
+    """
+    Resolve a list of group names to their JIDs.
+    Returns a list of (jid, name) tuples for found groups.
+    """
+    resolved_groups = []
+    
+    for group_name in group_names:
+        group_name = group_name.strip()
+        print(f"Resolving group name: '{group_name}'")
+        
+        matches = find_group_by_name(db_path, group_name)
+        
+        if not matches:
+            print(f"  Warning: No group found matching '{group_name}'")
+            continue
+        
+        if len(matches) == 1:
+            jid, name = matches[0]
+            print(f"  Found: {name} -> {jid}")
+            resolved_groups.append((jid, name))
+        else:
+            print(f"  Multiple groups found matching '{group_name}':")
+            for jid, name in matches:
+                print(f"    - {name} ({jid})")
+            
+            # Use the first match (alphabetically first)
+            jid, name = matches[0]
+            print(f"  Using first match: {name} -> {jid}")
+            resolved_groups.append((jid, name))
+    
+    return resolved_groups
+
+def run_non_interactive_mode(db_path, delay, output_file):
+    """
+    Run in non-interactive mode using environment variables.
+    """
+    print("Running in non-interactive mode using environment variables...")
+    
+    # Get source groups from environment variable
+    source_groups_env = os.getenv("WHATSAPP_SOURCE_GROUPS")
+    if not source_groups_env:
+        print("Error: WHATSAPP_SOURCE_GROUPS environment variable is not set.")
+        print("Please set it to a comma-separated list of group names.")
+        return
+    
+    # Parse group names
+    group_names = [name.strip() for name in source_groups_env.split(',') if name.strip()]
+    if not group_names:
+        print("Error: No valid group names found in WHATSAPP_SOURCE_GROUPS.")
+        return
+    
+    print(f"Source groups from env var: {group_names}")
+    
+    # Resolve group names to JIDs
+    selected_groups_data = resolve_group_names_to_jids(db_path, group_names)
+    
+    if not selected_groups_data:
+        print("Error: Could not resolve any group names to valid groups.")
+        return
+    
+    print(f"\nResolved {len(selected_groups_data)} groups:")
+    for jid, name in selected_groups_data:
+        print(f"- {name} ({jid})")
+    
+    # Get date range from environment variables
+    scan_days = int(os.getenv("WHATSAPP_SCAN_DAYS", "1"))
+    print(f"\nScanning last {scan_days} day(s) for links...")
+    
+    # Calculate date range
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=scan_days)
+    
+    start_date_str = start_date.strftime('%Y-%m-%d')
+    end_date_str = end_date.strftime('%Y-%m-%d')
+    
+    print(f"Date range: {start_date_str} to {end_date_str}")
+    
+    # Extract links
+    all_extracted_links = []
+    print("\nStarting link extraction...")
+    for group_jid, group_name in selected_groups_data:
+        print(f"- Searching in group: '{group_name}'")
+        try:
+            links_in_group = get_links_from_group(db_path, group_jid, group_name, start_date_str, end_date_str)
+            if links_in_group:
+                all_extracted_links.extend(links_in_group)
+                print(f"  Found {len(links_in_group)} links in '{group_name}'.")
+            else:
+                 print(f"  No links found in '{group_name}' for the specified period.")
+        except Exception as e:
+             print(f"Error processing group {group_name} ({group_jid}): {e}")
+
+    if not all_extracted_links:
+        print("\nNo links found in any of the selected groups for the specified date range.")
+        return
+        
+    print(f"\nExtracted {len(all_extracted_links)} links. Starting AI analysis...")
+
+    # AI Enrichment
+    enriched_links = []
+    for i, link_data in enumerate(all_extracted_links):
+        print(f"\nAnalyzing link {i+1}/{len(all_extracted_links)}: {link_data['link']}")
+        
+        analysis = analyze_link(link_data['link'], link_data['message'])
+        
+        # Merge analysis into the original data
+        link_data['ai_purpose'] = analysis.get('purpose', 'N/A')
+        link_data['ai_type'] = analysis.get('type', 'N/A')
+        link_data['ai_insights'] = analysis.get('insights', [])
+        
+        enriched_links.append(link_data)
+        
+        # Add a delay to avoid rate limiting
+        print(f"Waiting for {delay} seconds...")
+        time.sleep(delay)
+        
+    # Output
+    print(f"\nFinished analysis. Found a total of {len(enriched_links)} links with analysis attempts.")
+
+    # Determine output file name for enriched data
+    if not output_file:
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        output_file = f"enriched_links_{timestamp}.json" 
+    elif not output_file.lower().endswith('.json'):
+        output_file = output_file + '.json'
+    
+    # Save the enriched list to JSON
+    try:
+        save_links_to_file(enriched_links, output_file)
+        print(f"Enriched links data saved successfully to {output_file}")
+        return output_file
+    except Exception as e:
+        print(f"Error saving enriched data to file {output_file}: {e}")
+        return None
 
 if __name__ == "__main__":
     main()

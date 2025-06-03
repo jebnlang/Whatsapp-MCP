@@ -9,10 +9,140 @@ import time
 import requests
 
 # --- Configuration ---
-RECIPIENT_JID = "972526060403@s.whatsapp.net"
+# Remove hardcoded recipient, will use environment variable
 WHATSAPP_API_BASE_URL = "http://localhost:8080/api"
 DEFAULT_DELAY = 2.0 # Seconds between forwarding messages
 MAX_WHATSAPP_MESSAGE_LENGTH = 1500 # For warning only
+LAST_RUN_FILE = "last_forward_run.txt"
+
+# --- Timestamp Tracking Functions ---
+
+def get_last_run_time():
+    """Get timestamp of last successful run, or 24 hours ago if first run."""
+    try:
+        if os.path.exists(LAST_RUN_FILE):
+            with open(LAST_RUN_FILE, 'r') as f:
+                timestamp_str = f.read().strip()
+                last_run = datetime.fromisoformat(timestamp_str)
+                print(f"Found last run timestamp: {last_run}")
+                return last_run
+    except Exception as e:
+        print(f"Warning: Could not read last run time: {e}")
+    
+    # Fallback: 24 hours ago for first run
+    fallback_time = datetime.now() - timedelta(days=1)
+    print(f"No previous run found, using fallback time: {fallback_time}")
+    return fallback_time
+
+def update_last_run_time(timestamp=None):
+    """Update the last run timestamp file."""
+    if timestamp is None:
+        timestamp = datetime.now()
+    
+    try:
+        with open(LAST_RUN_FILE, 'w') as f:
+            f.write(timestamp.isoformat())
+        print(f"Updated last run time to: {timestamp}")
+        return True
+    except Exception as e:
+        print(f"Warning: Could not update last run time: {e}")
+        return False
+
+# --- Group Resolution Functions ---
+
+def find_group_by_name(db_path, group_name):
+    """Find a group JID by its name (partial match)."""
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT 
+                jid,
+                name
+            FROM chats
+            WHERE jid LIKE '%@g.us'
+            AND LOWER(name) LIKE LOWER(?)
+            ORDER BY name
+        """, (f"%{group_name}%",))
+        
+        groups = cursor.fetchall()
+        return groups
+        
+    except sqlite3.Error as e:
+        print(f"Database error: {e}")
+        return []
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+def resolve_group_names_to_jids(db_path, group_names):
+    """
+    Resolve a list of group names to their JIDs.
+    Returns a list of (jid, name) tuples for found groups.
+    """
+    resolved_groups = []
+    
+    for group_name in group_names:
+        group_name = group_name.strip()
+        print(f"Resolving group name: '{group_name}'")
+        
+        matches = find_group_by_name(db_path, group_name)
+        
+        if not matches:
+            print(f"  Warning: No group found matching '{group_name}'")
+            continue
+        
+        if len(matches) == 1:
+            jid, name = matches[0]
+            print(f"  Found: {name} -> {jid}")
+            resolved_groups.append((jid, name))
+        else:
+            print(f"  Multiple groups found matching '{group_name}':")
+            for jid, name in matches:
+                print(f"    - {name} ({jid})")
+            
+            # Use the first match (alphabetically first)
+            jid, name = matches[0]
+            print(f"  Using first match: {name} -> {jid}")
+            resolved_groups.append((jid, name))
+    
+    return resolved_groups
+
+def resolve_recipient_to_jid(recipient_input, db_path):
+    """
+    Resolves recipient input to a JID.
+    - If recipient looks like a JID (contains @), return as-is
+    - If recipient looks like a phone number (digits only), convert to JID
+    - If recipient is a group name, resolve to group JID
+    """
+    if not recipient_input:
+        return None
+    
+    recipient_input = recipient_input.strip()
+    
+    # If already a JID, return as-is
+    if "@" in recipient_input:
+        print(f"Recipient appears to be a JID: {recipient_input}")
+        return recipient_input
+    
+    # If it's all digits (phone number), convert to JID
+    if recipient_input.replace("+", "").replace("-", "").replace(" ", "").isdigit():
+        phone_jid = recipient_input.replace("+", "").replace("-", "").replace(" ", "") + "@s.whatsapp.net"
+        print(f"Converted phone number to JID: {phone_jid}")
+        return phone_jid
+    
+    # Otherwise, treat as group name and try to resolve it
+    print(f"Attempting to resolve group name '{recipient_input}' to JID...")
+    resolved_groups = resolve_group_names_to_jids(db_path, [recipient_input])
+    
+    if resolved_groups:
+        jid, name = resolved_groups[0]
+        print(f"Resolved recipient group: {name} -> {jid}")
+        return jid
+    else:
+        print(f"Could not resolve recipient '{recipient_input}' to a valid JID")
+        return None
 
 # --- Database and Helper Functions ---
 
@@ -48,10 +178,16 @@ def extract_links(text):
     url_pattern = r'https?://[^\s<>"\']+'
     return re.findall(url_pattern, text)
 
-def find_messages_with_links(db_path, group_jid, start_date=None, end_date=None):
+def find_messages_with_links(db_path, group_jid, start_datetime=None, end_datetime=None):
     """
-    Finds messages containing links in a specific group within a date range.
+    Finds messages containing links in a specific group within a datetime range.
     Returns a list of full message content strings.
+    
+    Args:
+        db_path: Path to the SQLite database file
+        group_jid: The JID of the group chat
+        start_datetime: Optional start datetime object
+        end_datetime: Optional end datetime object
     """
     conn = None
     messages_content = []
@@ -69,27 +205,25 @@ def find_messages_with_links(db_path, group_jid, start_date=None, end_date=None)
         """
         params = [group_jid]
 
-        # Add date conditions using datetime()
-        if start_date:
-            start_datetime_obj = datetime.strptime(start_date, '%Y-%m-%d')
-            start_iso = start_datetime_obj.isoformat()
+        # Add datetime conditions using ISO format
+        if start_datetime:
+            start_iso = start_datetime.isoformat()
             query += " AND datetime(timestamp) >= datetime(?) "
             params.append(start_iso)
 
-        if end_date:
-            end_date_obj = datetime.strptime(end_date, '%Y-%m-%d')
-            next_day_obj = end_date_obj + timedelta(days=1)
-            end_iso_exclusive = next_day_obj.isoformat()
+        if end_datetime:
+            end_iso = end_datetime.isoformat()
             query += " AND datetime(timestamp) < datetime(?) "
-            params.append(end_iso_exclusive)
+            params.append(end_iso)
 
         query += " ORDER BY timestamp" # Keep order for potential troubleshooting
 
         print(f"  Searching DB for messages in group {group_jid}...")
+        print(f"    Time range: {start_datetime} to {end_datetime}")
 
         cursor.execute(query, params)
         all_messages_in_range = cursor.fetchall()
-        print(f"    Found {len(all_messages_in_range)} total messages in date range for group.")
+        print(f"    Found {len(all_messages_in_range)} total messages in time range for group.")
 
         # Filter messages that contain links
         for msg_row in all_messages_in_range:
@@ -103,8 +237,8 @@ def find_messages_with_links(db_path, group_jid, start_date=None, end_date=None)
     except sqlite3.Error as e:
         print(f"Database error finding messages: {e}")
         return []
-    except ValueError as e:
-         print(f"Date parsing error finding messages: {e}")
+    except Exception as e:
+         print(f"Error finding messages: {e}")
          return []
     finally:
         if conn:

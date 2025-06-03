@@ -7,8 +7,13 @@ import requests # Ensure requests is imported
 from datetime import datetime
 
 # --- OpenAI API Setup ---
-# WARNING: Hardcoding keys is insecure. Use environment variables in production.
-OPENAI_API_KEY = "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"
+# Use environment variable for API key instead of hardcoding
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+if not OPENAI_API_KEY:
+    print("Error: OPENAI_API_KEY environment variable is not set.")
+    print("Please set your OpenAI API key as an environment variable.")
+    exit(1)
 
 try:
     client = openai.OpenAI(api_key=OPENAI_API_KEY)
@@ -22,6 +27,88 @@ except Exception as e:
 # Assumes the bridge runs locally on the default port
 WHATSAPP_API_BASE_URL = "http://localhost:8080/api"
 MAX_WHATSAPP_MESSAGE_LENGTH = 1500 # Approximate safe length
+
+# --- Helper Functions ---
+
+def resolve_recipient_to_jid(recipient_input):
+    """
+    Resolves recipient input to a JID.
+    - If recipient looks like a JID (contains @), return as-is
+    - If recipient looks like a phone number (digits only), convert to JID
+    - If recipient is a group name, resolve to group JID
+    """
+    if not recipient_input:
+        return None
+    
+    recipient_input = recipient_input.strip()
+    
+    # If already a JID, return as-is
+    if "@" in recipient_input:
+        print(f"Recipient appears to be a JID: {recipient_input}")
+        return recipient_input
+    
+    # If it's all digits (phone number), convert to JID
+    if recipient_input.replace("+", "").replace("-", "").replace(" ", "").isdigit():
+        phone_jid = recipient_input.replace("+", "").replace("-", "").replace(" ", "") + "@s.whatsapp.net"
+        print(f"Converted phone number to JID: {phone_jid}")
+        return phone_jid
+    
+    # Otherwise, treat as group name and try to resolve it
+    print(f"Attempting to resolve group name '{recipient_input}' to JID...")
+    return resolve_group_name_to_jid(recipient_input)
+
+def resolve_group_name_to_jid(group_name):
+    """
+    Resolves a group name to its JID by querying the WhatsApp bridge database.
+    """
+    import sqlite3
+    
+    try:
+        # Try to connect to the messages database
+        db_path = os.path.join("whatsapp-mcp", "whatsapp-bridge", "store", "messages.db")
+        if not os.path.exists(db_path):
+            # Try relative path from current directory
+            db_path = os.path.join("store", "messages.db")
+            if not os.path.exists(db_path):
+                print(f"Error: Cannot find messages database at {db_path}")
+                return None
+        
+        print(f"Connecting to database: {db_path}")
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        
+        # Search for group by name (partial match)
+        cursor.execute("""
+            SELECT jid, name FROM chats 
+            WHERE name LIKE ? AND jid LIKE '%@g.us' 
+            ORDER BY last_message_time DESC
+        """, (f"%{group_name}%",))
+        
+        results = cursor.fetchall()
+        conn.close()
+        
+        if not results:
+            print(f"No group found matching name '{group_name}'")
+            return None
+        
+        if len(results) == 1:
+            jid, name = results[0]
+            print(f"Found group: {name} -> {jid}")
+            return jid
+        
+        # Multiple matches found
+        print(f"Multiple groups found matching '{group_name}':")
+        for jid, name in results:
+            print(f"  - {name} ({jid})")
+        
+        # Use the first match (most recent activity)
+        jid, name = results[0]
+        print(f"Using first match: {name} -> {jid}")
+        return jid
+        
+    except Exception as e:
+        print(f"Error resolving group name to JID: {e}")
+        return None
 
 # --- Translation Function ---
 
@@ -233,13 +320,21 @@ def main():
         # For now, let's proceed even if file saving failed, but the summary exists
 
     # 4. Send via WhatsApp (if recipient provided)
-    if args.recipient:
-        if not args.recipient.endswith("@s.whatsapp.net"):
-            print(f"Warning: Recipient JID '{args.recipient}' does not look like a valid JID (should end with @s.whatsapp.net). Attempting anyway.")
+    # Check environment variable first, then command line argument
+    recipient_input = os.getenv("WHATSAPP_SUMMARY_RECIPIENT") or args.recipient
+    
+    if recipient_input:
+        print(f"\nResolving recipient: {recipient_input}")
+        recipient_jid = resolve_recipient_to_jid(recipient_input)
         
-        send_whatsapp_message(args.recipient, final_summary)
+        if recipient_jid:
+            send_whatsapp_message(recipient_jid, final_summary)
+        else:
+            print(f"Error: Could not resolve recipient '{recipient_input}' to a valid JID.")
+            print("Please check the group name or provide a valid phone number/JID.")
     else:
-        print("\n--recipient not provided, skipping WhatsApp send.")
+        print("\nNo recipient specified via --recipient argument or WHATSAPP_SUMMARY_RECIPIENT environment variable.")
+        print("Skipping WhatsApp send.")
 
 if __name__ == "__main__":
     main()
