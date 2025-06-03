@@ -1,0 +1,30 @@
+[build]
+builder = "dockerfile"
+
+[deploy]
+startCommand = "sh start.sh"
+healthcheckPath = "/health"
+healthcheckTimeout = 300
+restartPolicyType = "always"
+
+[[deploy.variables]]
+name = "OPENAI_API_KEY"
+description = "OpenAI API key for link analysis and Hebrew translation"
+
+[[deploy.variables]]
+name = "WHATSAPP_SOURCE_GROUPS"
+description = "Comma-separated list of group names to scan for links"
+value = "BSG - General,Tech Discussions"
+
+[[deploy.variables]]
+name = "WHATSAPP_FORWARD_RECIPIENT"
+description = "Group name or phone number to forward links to"
+value = "BSG - General"
+
+[[deploy.variables]]
+name = "WHATSAPP_BRIDGE_WAIT_TIME"
+description = "Minutes to wait for bridge sync before running forwarder"
+value = "20"
+
+[deploy.volumes]
+"/app/persistent" = "whatsapp-data" 
