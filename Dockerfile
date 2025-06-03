@@ -1,5 +1,5 @@
 # Multi-stage build for WhatsApp Link Forwarder
-FROM golang:1.21-alpine AS go-builder
+FROM golang:1.23-alpine AS go-builder
 
 # Install build dependencies
 RUN apk add --no-cache gcc musl-dev sqlite-dev
