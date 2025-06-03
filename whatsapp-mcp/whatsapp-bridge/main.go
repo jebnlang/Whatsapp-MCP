@@ -950,6 +950,11 @@ func main() {
 
 	fmt.Println("\n✓ Connected to WhatsApp! Type 'help' for commands.")
 
+	// Save session to persistent volume for future runs
+	if err := SaveSessionToPersistentVolume(logger); err != nil {
+		logger.Warnf("Failed to save session to persistent volume: %v", err)
+	}
+
 	// Start REST API server
 	startRESTServer(client, messageStore, 8080, logger)
 
@@ -1499,10 +1504,36 @@ func handleGetGroupMembers(w http.ResponseWriter, r *http.Request, client *whats
 }
 
 // RestoreSessionFromBase64 restores WhatsApp session from base64 encoded environment variable
+// or from persistent volume file
 func RestoreSessionFromBase64(logger waLog.Logger) error {
+	// First, try to restore from persistent volume (Railway deployment)
+	persistentSessionPath := "/app/persistent/whatsapp.db"
+	if _, err := os.Stat(persistentSessionPath); err == nil {
+		logger.Infof("Found session in persistent volume, copying to local store...")
+
+		// Ensure store directory exists
+		if err := os.MkdirAll("store", 0755); err != nil {
+			return fmt.Errorf("failed to create store directory: %v", err)
+		}
+
+		// Copy from persistent volume to local store
+		sessionData, err := os.ReadFile(persistentSessionPath)
+		if err != nil {
+			return fmt.Errorf("failed to read session from persistent volume: %v", err)
+		}
+
+		if err := os.WriteFile("store/whatsapp.db", sessionData, 0644); err != nil {
+			return fmt.Errorf("failed to copy session to local store: %v", err)
+		}
+
+		logger.Infof("Successfully restored WhatsApp session from persistent volume (%d bytes)", len(sessionData))
+		return nil
+	}
+
+	// Fall back to environment variable approach (for testing/local use)
 	sessionB64 := os.Getenv("WHATSAPP_SESSION_B64")
 	if sessionB64 == "" {
-		logger.Infof("No WHATSAPP_SESSION_B64 environment variable found, proceeding with normal flow")
+		logger.Infof("No session found in persistent volume or WHATSAPP_SESSION_B64 environment variable")
 		return nil
 	}
 
@@ -1526,5 +1557,37 @@ func RestoreSessionFromBase64(logger waLog.Logger) error {
 	}
 
 	logger.Infof("Successfully restored WhatsApp session from base64 data (%d bytes)", len(sessionData))
+	return nil
+}
+
+// SaveSessionToPersistentVolume saves the current session to persistent volume for future runs
+func SaveSessionToPersistentVolume(logger waLog.Logger) error {
+	// Check if session file exists locally
+	localSessionPath := "store/whatsapp.db"
+	if _, err := os.Stat(localSessionPath); err != nil {
+		logger.Infof("No local session file to save")
+		return nil
+	}
+
+	// Ensure persistent directory exists
+	persistentDir := "/app/persistent"
+	if err := os.MkdirAll(persistentDir, 0755); err != nil {
+		// Not an error if we can't create persistent directory (local development)
+		logger.Infof("Could not create persistent directory (probably local development): %v", err)
+		return nil
+	}
+
+	// Copy session to persistent volume
+	sessionData, err := os.ReadFile(localSessionPath)
+	if err != nil {
+		return fmt.Errorf("failed to read local session: %v", err)
+	}
+
+	persistentSessionPath := "/app/persistent/whatsapp.db"
+	if err := os.WriteFile(persistentSessionPath, sessionData, 0644); err != nil {
+		return fmt.Errorf("failed to save session to persistent volume: %v", err)
+	}
+
+	logger.Infof("Successfully saved session to persistent volume (%d bytes)", len(sessionData))
 	return nil
 }
