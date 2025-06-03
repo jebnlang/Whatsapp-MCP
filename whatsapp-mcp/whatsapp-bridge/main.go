@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -829,6 +830,12 @@ func main() {
 	logger := waLog.Stdout("Client", "INFO", true)
 	logger.Infof("Starting WhatsApp client...")
 
+	// Restore session from base64 if environment variable is set
+	if err := RestoreSessionFromBase64(logger); err != nil {
+		logger.Errorf("Failed to restore session from base64: %v", err)
+		return
+	}
+
 	// Create database connection for storing session data
 	dbLog := waLog.Stdout("Database", "INFO", true)
 
@@ -1489,4 +1496,35 @@ func handleGetGroupMembers(w http.ResponseWriter, r *http.Request, client *whats
 
 	logger.Infof("Successfully retrieved %d members for group %s", len(memberJIDs), jidStr)
 	writeJSONResponse(w, GroupMembersResponse{Members: memberJIDs})
+}
+
+// RestoreSessionFromBase64 restores WhatsApp session from base64 encoded environment variable
+func RestoreSessionFromBase64(logger waLog.Logger) error {
+	sessionB64 := os.Getenv("WHATSAPP_SESSION_B64")
+	if sessionB64 == "" {
+		logger.Infof("No WHATSAPP_SESSION_B64 environment variable found, proceeding with normal flow")
+		return nil
+	}
+
+	logger.Infof("Found WHATSAPP_SESSION_B64 environment variable, restoring session...")
+
+	// Decode the base64 data
+	sessionData, err := base64.StdEncoding.DecodeString(sessionB64)
+	if err != nil {
+		return fmt.Errorf("failed to decode base64 session data: %v", err)
+	}
+
+	// Ensure store directory exists
+	if err := os.MkdirAll("store", 0755); err != nil {
+		return fmt.Errorf("failed to create store directory: %v", err)
+	}
+
+	// Write the decoded session data to whatsapp.db
+	sessionPath := "store/whatsapp.db"
+	if err := os.WriteFile(sessionPath, sessionData, 0644); err != nil {
+		return fmt.Errorf("failed to write session database: %v", err)
+	}
+
+	logger.Infof("Successfully restored WhatsApp session from base64 data (%d bytes)", len(sessionData))
+	return nil
 }
