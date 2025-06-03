@@ -34,14 +34,11 @@ WORKDIR /app
 # Copy Go binary from builder stage
 COPY --from=go-builder /build/whatsapp-bridge /app/
 
-# Copy Python scripts
+# Copy Python script (only the link forwarding script)
 COPY forward_links_preview.py /app/
-COPY generate_hebrew_summary.py /app/
-COPY get_links_cli.py /app/
 
-# Install Python dependencies
+# Install Python dependencies (removed OpenAI)
 RUN pip install --no-cache-dir \
-    openai \
     requests \
     beautifulsoup4
 

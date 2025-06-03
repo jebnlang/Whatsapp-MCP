@@ -6,7 +6,6 @@ This guide walks you through deploying the WhatsApp Link Forwarder to Railway wi
 
 1. ✅ **Railway Account** - Sign up at [railway.app](https://railway.app)
 2. ✅ **Working Local Setup** - Your WhatsApp bridge should be authenticated locally
-3. ✅ **OpenAI API Key** - For link analysis and Hebrew translation
 
 ## 🔧 Step 1: Initial Railway Setup
 
@@ -33,14 +32,12 @@ Set these in your Railway dashboard under **Variables**:
 
 ### Required Variables:
 ```bash
-OPENAI_API_KEY=sk-proj-your-openai-key-here
 WHATSAPP_SOURCE_GROUPS=BSG - General,Tech Discussions
 WHATSAPP_FORWARD_RECIPIENT=BSG - General
 WHATSAPP_BRIDGE_WAIT_TIME=20
 ```
 
 ### Variable Descriptions:
-- **OPENAI_API_KEY**: Your OpenAI API key for content analysis
 - **WHATSAPP_SOURCE_GROUPS**: Comma-separated group names to scan for links
 - **WHATSAPP_FORWARD_RECIPIENT**: Group name or phone number to forward links to
 - **WHATSAPP_BRIDGE_WAIT_TIME**: Minutes to wait for message sync (default: 20)
@@ -152,9 +149,6 @@ The service includes automatic health monitoring:
 
 #### ❌ "Could not resolve group name"
 **Solution**: Check group names in `WHATSAPP_SOURCE_GROUPS` match exactly
-
-#### ❌ "OpenAI API Error"
-**Solution**: Verify `OPENAI_API_KEY` is correct and has sufficient credits
 
 #### ❌ "Bridge not responsive"
 **Solution**: Check if session is valid and WhatsApp hasn't logged out the device

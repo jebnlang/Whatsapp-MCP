@@ -8,10 +8,6 @@ healthcheckTimeout = 300
 restartPolicyType = "always"
 
 [[deploy.variables]]
-name = "OPENAI_API_KEY"
-description = "OpenAI API key for link analysis and Hebrew translation"
-
-[[deploy.variables]]
 name = "WHATSAPP_SOURCE_GROUPS"
 description = "Comma-separated list of group names to scan for links"
 value = "BSG - General,Tech Discussions"
