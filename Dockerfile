@@ -34,31 +34,34 @@ WORKDIR /app
 # Copy Go binary from builder stage
 COPY --from=go-builder /build/whatsapp-bridge /app/
 
-# Copy Python script (only the link forwarding script)
+# Copy Python scripts
 COPY forward_links_preview.py /app/
+COPY web_server.py /app/
 
-# Install Python dependencies (removed OpenAI)
+# Install Python dependencies (added Flask)
 RUN pip install --no-cache-dir \
     requests \
-    beautifulsoup4
+    beautifulsoup4 \
+    flask
 
 # Create necessary directories
 RUN mkdir -p /app/store /app/persistent
 
-# Copy startup script
+# Copy startup script (legacy, not used anymore)
 COPY start.sh /app/
 RUN chmod +x /app/start.sh
 
-# Add health check endpoint script
+# Add health check endpoint script (legacy, not used anymore)
 COPY health_check.py /app/
 RUN chmod +x /app/health_check.py
 
-# Expose port for WhatsApp bridge API
-EXPOSE 8080
+# Make web server executable
+RUN chmod +x /app/web_server.py
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD python /app/health_check.py || exit 1
+# Expose port for web service (Railway will set PORT env var)
+EXPOSE 8000
 
-# Run startup script
-CMD ["sh", "/app/start.sh"] 
+# NO HEALTHCHECK - using Railway's built-in health checks via /health endpoint
+
+# ONLY CMD: Run web server (which handles everything)
+CMD ["python3", "/app/web_server.py"] 
