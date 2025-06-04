@@ -42,35 +42,58 @@ def monitor_bridge_logs():
         # Monitor output for QR codes
         qr_lines = []
         capturing_qr = False
+        line_count = 0
+        start_time = time.time()
         
         while bridge_process.poll() is None:
             try:
                 line = bridge_process.stdout.readline()
                 if line:
+                    line_count += 1
                     service_status["bridge_logs"].append(line.strip())
-                    print(line.strip())
+                    print(f"Bridge [{line_count}]: {line.strip()}")
                     
-                    # Detect QR code start
-                    if "Scan this QR code" in line:
-                        print("🔍 QR code detected!")
+                    # More aggressive QR detection
+                    if any(phrase in line.lower() for phrase in ["scan this qr", "qr code", "whatsapp app"]):
+                        print("🔍 QR code section detected!")
                         capturing_qr = True
                         qr_lines = []
                         continue
                     
-                    # Capture QR code lines - more inclusive pattern
+                    # Check if already authenticated
+                    if any(phrase in line.lower() for phrase in ["logged in", "authenticated", "connected to whatsapp", "session restored"]):
+                        print("✅ WhatsApp already authenticated!")
+                        service_status["qr_code"] = "AUTHENTICATED"
+                        break
+                    
+                    # Capture QR code lines - even more inclusive
                     if capturing_qr:
-                        # Look for QR characters or lines that look like QR borders
-                        if any(char in line for char in ['█', '▀', '▄', '▐', '▌', '▆', '▇']) or line.strip().startswith('████'):
+                        # Check for ANY line with block characters
+                        if any(char in line for char in ['█', '▀', '▄', '▐', '▌', '▆', '▇', '▘', '▝', '▗', '▖']):
                             qr_lines.append(line.rstrip())
-                        # Also capture lines that are mostly block characters
-                        elif len([c for c in line if c in '█▀▄▐▌▆▇ ']) > len(line.strip()) * 0.7:
+                            print(f"📦 QR line captured: {len(qr_lines)} lines so far")
+                        # Also capture lines that start with multiple block chars
+                        elif line.strip().startswith('██') or '████' in line:
                             qr_lines.append(line.rstrip())
-                        # Stop capturing when we hit a completely different line
-                        elif line.strip() and not any(char in line for char in ['█', '▀', '▄', '▐', '▌', '▆', '▇']):
-                            if qr_lines and len(qr_lines) > 20:  # Reasonable QR size
+                            print(f"📦 QR border captured: {len(qr_lines)} lines so far")
+                        # Stop capturing on empty lines or text after QR
+                        elif line.strip() == '' or (line.strip() and not any(char in line for char in ['█', '▀', '▄', '▐', '▌', '▆', '▇', '▘', '▝', '▗', '▖', ' '])):
+                            if qr_lines and len(qr_lines) > 15:  # Lower threshold
                                 service_status["qr_code"] = '\n'.join(qr_lines)
                                 print(f"✅ QR code captured! ({len(qr_lines)} lines)")
+                                print(f"🔍 QR preview: {qr_lines[0][:50]}...")
+                                break  # Stop monitoring once we have a QR
+                            elif qr_lines:
+                                print(f"⚠️ QR too short ({len(qr_lines)} lines), continuing...")
                             capturing_qr = False
+                    
+                # Check for timeout - restart bridge if no QR after 60 seconds
+                if time.time() - start_time > 60 and not service_status.get("qr_code"):
+                    print("⏰ Timeout: No QR code detected, restarting bridge...")
+                    bridge_process.terminate()
+                    time.sleep(2)
+                    service_status["qr_code"] = None
+                    break  # This will restart the function
                     
             except Exception as e:
                 print(f"Error reading bridge output: {e}")
@@ -187,18 +210,27 @@ def qr_display():
         <div class="container">
             <h1>🔐 WhatsApp Authentication</h1>
             {% if qr_code %}
-                <div class="status">✅ QR Code Ready - Scan Now!</div>
-                <div class="qr-code">{{ qr_code|safe }}</div>
-                <div class="instructions">
-                    <h3>📱 How to Scan:</h3>
-                    <ol>
-                        <li><strong>Open WhatsApp</strong> on your phone</li>
-                        <li>Go to <strong>Settings → Linked Devices</strong></li>
-                        <li>Tap <strong>"Link a Device"</strong></li>
-                        <li><strong>Scan the QR code above</strong></li>
-                        <li>Wait for confirmation ✅</li>
-                    </ol>
-                </div>
+                {% if qr_code == "AUTHENTICATED" %}
+                    <div class="status">✅ WhatsApp Already Authenticated!</div>
+                    <div class="instructions">
+                        <h3>🎉 Great! Your WhatsApp is connected!</h3>
+                        <p>No QR code needed - your session is already active.</p>
+                        <p>The system is ready for automated link forwarding.</p>
+                    </div>
+                {% else %}
+                    <div class="status">✅ QR Code Ready - Scan Now!</div>
+                    <div class="qr-code">{{ qr_code|safe }}</div>
+                    <div class="instructions">
+                        <h3>📱 How to Scan:</h3>
+                        <ol>
+                            <li><strong>Open WhatsApp</strong> on your phone</li>
+                            <li>Go to <strong>Settings → Linked Devices</strong></li>
+                            <li>Tap <strong>"Link a Device"</strong></li>
+                            <li><strong>Scan the QR code above</strong></li>
+                            <li>Wait for confirmation ✅</li>
+                        </ol>
+                    </div>
+                {% endif %}
             {% else %}
                 <div class="waiting">⏳ Generating QR Code...</div>
                 <p>WhatsApp bridge is starting up. The QR code will appear here in ~30 seconds.</p>
