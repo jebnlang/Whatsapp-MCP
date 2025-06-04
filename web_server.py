@@ -57,23 +57,21 @@ def monitor_bridge_logs():
                         qr_lines = []
                         continue
                     
-                    # Capture QR code lines
-                    if capturing_qr and ('█' in line or '▀' in line or '▄' in line or '▐' in line):
-                        qr_lines.append(line.rstrip())
-                        
-                        # Check if we have enough lines for a complete QR
-                        if len(qr_lines) > 30:
-                            service_status["qr_code"] = '\n'.join(qr_lines)
-                            print(f"✅ QR code captured! ({len(qr_lines)} lines)")
+                    # Capture QR code lines - more inclusive pattern
+                    if capturing_qr:
+                        # Look for QR characters or lines that look like QR borders
+                        if any(char in line for char in ['█', '▀', '▄', '▐', '▌', '▆', '▇']) or line.strip().startswith('████'):
+                            qr_lines.append(line.rstrip())
+                        # Also capture lines that are mostly block characters
+                        elif len([c for c in line if c in '█▀▄▐▌▆▇ ']) > len(line.strip()) * 0.7:
+                            qr_lines.append(line.rstrip())
+                        # Stop capturing when we hit a completely different line
+                        elif line.strip() and not any(char in line for char in ['█', '▀', '▄', '▐', '▌', '▆', '▇']):
+                            if qr_lines and len(qr_lines) > 20:  # Reasonable QR size
+                                service_status["qr_code"] = '\n'.join(qr_lines)
+                                print(f"✅ QR code captured! ({len(qr_lines)} lines)")
                             capturing_qr = False
                     
-                    # Stop capturing if we hit non-QR content
-                    elif capturing_qr and line.strip() and not any(char in line for char in ['█', '▀', '▄', '▐']):
-                        if qr_lines:  # Save what we have
-                            service_status["qr_code"] = '\n'.join(qr_lines)
-                            print(f"✅ QR code captured! ({len(qr_lines)} lines)")
-                        capturing_qr = False
-                        
             except Exception as e:
                 print(f"Error reading bridge output: {e}")
                 break
@@ -96,7 +94,7 @@ def root():
     return jsonify({
         "service": "WhatsApp Link Forwarder",
         "status": "running",
-        "endpoints": ["/health", "/qr", "/logs"],
+        "endpoints": ["/health", "/qr", "/logs", "/qr-debug"],
         "bridge_running": service_status["bridge_process"] is not None
     })
 
@@ -130,17 +128,18 @@ def qr_display():
             }
             .qr-code { 
                 font-family: 'Courier New', monospace; 
-                font-size: 6px; 
-                line-height: 0.4; 
-                white-space: pre; 
+                font-size: 7px; 
+                line-height: 0.45; 
+                white-space: pre-wrap; 
                 background: white; 
                 color: black; 
-                padding: 15px; 
+                padding: 20px; 
                 border-radius: 10px; 
                 display: inline-block; 
                 margin: 20px 0;
                 max-width: 100%;
                 overflow: auto;
+                border: 2px solid #000;
             }
             .status { 
                 background: #25D366; 
@@ -189,7 +188,7 @@ def qr_display():
             <h1>🔐 WhatsApp Authentication</h1>
             {% if qr_code %}
                 <div class="status">✅ QR Code Ready - Scan Now!</div>
-                <div class="qr-code">{{ qr_code }}</div>
+                <div class="qr-code">{{ qr_code|safe }}</div>
                 <div class="instructions">
                     <h3>📱 How to Scan:</h3>
                     <ol>
@@ -231,6 +230,18 @@ def logs():
         "logs": recent_logs,
         "total_lines": len(service_status["bridge_logs"]),
         "bridge_running": service_status["bridge_process"] is not None
+    })
+
+@app.route('/qr-debug')
+def qr_debug():
+    """Debug endpoint to show raw QR code data."""
+    qr_data = service_status.get("qr_code", "")
+    return jsonify({
+        "qr_code_present": bool(qr_data),
+        "qr_code_length": len(qr_data),
+        "qr_code_lines": qr_data.count('\n') + 1 if qr_data else 0,
+        "qr_code_preview": qr_data[:200] + "..." if len(qr_data) > 200 else qr_data,
+        "qr_code_raw": qr_data
     })
 
 def signal_handler(signum, frame):
