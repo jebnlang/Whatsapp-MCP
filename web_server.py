@@ -151,18 +151,36 @@ def qr_display():
             }
             .qr-code { 
                 font-family: 'Courier New', monospace; 
-                font-size: 7px; 
-                line-height: 0.45; 
-                white-space: pre-wrap; 
+                font-size: 6px; 
+                line-height: 1.1; 
+                white-space: pre; 
                 background: white; 
                 color: black; 
-                padding: 20px; 
-                border-radius: 10px; 
+                padding: 15px; 
+                border-radius: 8px; 
                 display: inline-block; 
                 margin: 20px 0;
-                max-width: 100%;
-                overflow: auto;
-                border: 2px solid #000;
+                max-width: 500px;
+                overflow: visible;
+                border: 3px solid #000;
+                letter-spacing: -0.5px;
+                word-spacing: 0px;
+                font-weight: normal;
+            }
+            @media (max-width: 768px) {
+                .qr-code {
+                    font-size: 4px;
+                    line-height: 1.0;
+                    max-width: 350px;
+                    padding: 10px;
+                }
+            }
+            @media (min-width: 1200px) {
+                .qr-code {
+                    font-size: 8px;
+                    line-height: 1.2;
+                    max-width: 600px;
+                }
             }
             .status { 
                 background: #25D366; 
