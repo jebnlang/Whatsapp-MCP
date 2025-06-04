@@ -2,7 +2,6 @@
 builder = "dockerfile"
 
 [deploy]
-startCommand = "sh start.sh"
 healthcheckPath = "/health"
 healthcheckTimeout = 300
 restartPolicyType = "always"
@@ -10,17 +9,17 @@ restartPolicyType = "always"
 [[deploy.variables]]
 name = "WHATSAPP_SOURCE_GROUPS"
 description = "Comma-separated list of group names to scan for links"
-value = "BSG - General,Tech Discussions"
+value = "Sling. Ship. Grow"
 
 [[deploy.variables]]
 name = "WHATSAPP_FORWARD_RECIPIENT"
 description = "Group name or phone number to forward links to"
-value = "BSG - General"
+value = "בני אוהב את עצמו"
 
 [[deploy.variables]]
 name = "WHATSAPP_BRIDGE_WAIT_TIME"
 description = "Minutes to wait for bridge sync before running forwarder"
-value = "20"
+value = "2"
 
 [deploy.volumes]
 "/app/persistent" = "whatsapp-data" 
