@@ -37,6 +37,8 @@ COPY --from=go-builder /build/whatsapp-bridge /app/
 # Copy Python scripts
 COPY forward_links_preview.py /app/
 COPY web_server.py /app/
+COPY test_bridge.py /app/
+COPY post_deployment.py /app/
 
 # Install Python dependencies (added Flask)
 RUN pip install --no-cache-dir \
@@ -55,8 +57,8 @@ RUN chmod +x /app/start.sh
 COPY health_check.py /app/
 RUN chmod +x /app/health_check.py
 
-# Make web server executable
-RUN chmod +x /app/web_server.py
+# Make scripts executable
+RUN chmod +x /app/web_server.py /app/test_bridge.py /app/post_deployment.py
 
 # Expose port for web service (Railway will set PORT env var)
 EXPOSE 8000

@@ -6,6 +6,13 @@ healthcheckPath = "/health"
 healthcheckTimeout = 300
 restartPolicyType = "always"
 
+# Railway Cron Job Configuration
+[[deploy.cron]]
+name = "daily-link-forwarding"
+command = "RAILWAY_RUN_TYPE=cron python3 /app/post_deployment.py"
+schedule = "0 23 * * *"  # Daily at 11 PM UTC
+description = "Daily WhatsApp link forwarding with rich previews"
+
 [[deploy.variables]]
 name = "WHATSAPP_SOURCE_GROUPS"
 description = "Comma-separated list of group names to scan for links"

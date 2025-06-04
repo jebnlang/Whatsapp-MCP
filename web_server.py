@@ -64,6 +64,42 @@ def monitor_bridge_logs():
                     if any(phrase in line.lower() for phrase in ["logged in", "authenticated", "connected to whatsapp", "session restored"]):
                         print("✅ WhatsApp already authenticated!")
                         service_status["qr_code"] = "AUTHENTICATED"
+                        
+                        # Auto-trigger deployment flow if not already running
+                        if service_status.get("deployment_flow_status") not in ["running", "completed"]:
+                            print("🚀 Auto-triggering post-deployment flow...")
+                            try:
+                                def auto_run_deployment_flow():
+                                    try:
+                                        result = subprocess.run(
+                                            ["python3", "/app/post_deployment.py"],
+                                            capture_output=True,
+                                            text=True,
+                                            timeout=1800
+                                        )
+                                        
+                                        if result.returncode == 0:
+                                            print("✅ Auto post-deployment flow completed!")
+                                            service_status["deployment_flow_status"] = "completed"
+                                            service_status["deployment_flow_output"] = result.stdout
+                                        else:
+                                            print("❌ Auto post-deployment flow failed!")
+                                            service_status["deployment_flow_status"] = "failed"
+                                            service_status["deployment_flow_error"] = result.stderr
+                                            
+                                    except Exception as e:
+                                        print(f"❌ Auto deployment flow exception: {str(e)}")
+                                        service_status["deployment_flow_status"] = "error"
+                                        service_status["deployment_flow_error"] = str(e)
+                                
+                                # Start auto deployment flow
+                                auto_thread = threading.Thread(target=auto_run_deployment_flow, daemon=True)
+                                auto_thread.start()
+                                service_status["deployment_flow_status"] = "running"
+                                
+                            except Exception as e:
+                                print(f"❌ Failed to auto-trigger deployment flow: {str(e)}")
+                        
                         break
                     
                     # Capture QR code lines - even more inclusive
@@ -117,8 +153,9 @@ def root():
     return jsonify({
         "service": "WhatsApp Link Forwarder",
         "status": "running",
-        "endpoints": ["/health", "/qr", "/logs", "/qr-debug"],
-        "bridge_running": service_status["bridge_process"] is not None
+        "endpoints": ["/health", "/qr", "/logs", "/qr-debug", "/trigger-deployment-flow", "/deployment-status"],
+        "bridge_running": service_status["bridge_process"] is not None,
+        "deployment_flow_status": service_status.get("deployment_flow_status", "not_started")
     })
 
 @app.route('/qr')
@@ -234,7 +271,66 @@ def qr_display():
                         <h3>🎉 Great! Your WhatsApp is connected!</h3>
                         <p>No QR code needed - your session is already active.</p>
                         <p>The system is ready for automated link forwarding.</p>
+                        
+                        <div style="margin-top: 20px;">
+                            <button class="refresh-btn" onclick="triggerDeploymentFlow()">
+                                🚀 Run Post-Deployment Tests
+                            </button>
+                            <button class="refresh-btn" onclick="checkDeploymentStatus()" style="background: #2196F3;">
+                                📊 Check Status
+                            </button>
+                        </div>
+                        
+                        <div id="deployment-status" style="margin-top: 15px; padding: 10px; border-radius: 5px; display: none;">
+                            <h4>📋 Deployment Status:</h4>
+                            <pre id="deployment-output" style="background: #000; color: #0f0; padding: 10px; border-radius: 5px; max-height: 300px; overflow-y: auto;"></pre>
+                        </div>
                     </div>
+                    
+                    <script>
+                        function triggerDeploymentFlow() {
+                            document.getElementById('deployment-status').style.display = 'block';
+                            document.getElementById('deployment-output').textContent = '🚀 Starting post-deployment flow...';
+                            
+                            fetch('/trigger-deployment-flow')
+                                .then(response => response.json())
+                                .then(data => {
+                                    if (data.status === 'success') {
+                                        document.getElementById('deployment-output').textContent = '✅ Deployment flow triggered successfully!\n📊 Checking status every 5 seconds...';
+                                        // Start polling for status
+                                        setInterval(checkDeploymentStatus, 5000);
+                                    } else {
+                                        document.getElementById('deployment-output').textContent = '❌ Failed to trigger deployment flow: ' + data.message;
+                                    }
+                                })
+                                .catch(error => {
+                                    document.getElementById('deployment-output').textContent = '❌ Error: ' + error.message;
+                                });
+                        }
+                        
+                        function checkDeploymentStatus() {
+                            fetch('/deployment-status')
+                                .then(response => response.json())
+                                .then(data => {
+                                    const statusDiv = document.getElementById('deployment-status');
+                                    const outputDiv = document.getElementById('deployment-output');
+                                    
+                                    statusDiv.style.display = 'block';
+                                    
+                                    let statusText = `📊 Status: ${data.deployment_flow_status}\n`;
+                                    
+                                    if (data.deployment_flow_output) {
+                                        statusText += '\n📋 Output:\n' + data.deployment_flow_output;
+                                    }
+                                    
+                                    if (data.deployment_flow_error) {
+                                        statusText += '\n🚨 Error:\n' + data.deployment_flow_error;
+                                    }
+                                    
+                                    outputDiv.textContent = statusText;
+                                });
+                        }
+                    </script>
                 {% else %}
                     <div class="status">✅ QR Code Ready - Scan Now!</div>
                     <div class="qr-code">{{ qr_code|safe }}</div>
@@ -292,6 +388,68 @@ def qr_debug():
         "qr_code_lines": qr_data.count('\n') + 1 if qr_data else 0,
         "qr_code_preview": qr_data[:200] + "..." if len(qr_data) > 200 else qr_data,
         "qr_code_raw": qr_data
+    })
+
+@app.route('/trigger-deployment-flow')
+def trigger_deployment_flow():
+    """Trigger the post-deployment testing flow."""
+    try:
+        print("🚀 Triggering post-deployment flow...")
+        
+        # Run post-deployment script in background
+        import subprocess
+        import threading
+        
+        def run_deployment_flow():
+            try:
+                result = subprocess.run(
+                    ["python3", "/app/post_deployment.py"],
+                    capture_output=True,
+                    text=True,
+                    timeout=1800  # 30 minute timeout
+                )
+                
+                if result.returncode == 0:
+                    print("✅ Post-deployment flow completed successfully!")
+                    service_status["deployment_flow_status"] = "completed"
+                    service_status["deployment_flow_output"] = result.stdout
+                else:
+                    print("❌ Post-deployment flow failed!")
+                    service_status["deployment_flow_status"] = "failed"
+                    service_status["deployment_flow_error"] = result.stderr
+                    
+            except Exception as e:
+                print(f"❌ Post-deployment flow exception: {str(e)}")
+                service_status["deployment_flow_status"] = "error"
+                service_status["deployment_flow_error"] = str(e)
+        
+        # Start deployment flow in background
+        deployment_thread = threading.Thread(target=run_deployment_flow, daemon=True)
+        deployment_thread.start()
+        
+        service_status["deployment_flow_status"] = "running"
+        
+        return jsonify({
+            "status": "success",
+            "message": "Post-deployment flow triggered",
+            "deployment_status": "running"
+        })
+        
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": f"Failed to trigger deployment flow: {str(e)}"
+        }), 500
+
+@app.route('/deployment-status')
+def deployment_status():
+    """Check the status of the post-deployment flow."""
+    return jsonify({
+        "deployment_flow_status": service_status.get("deployment_flow_status", "not_started"),
+        "deployment_flow_output": service_status.get("deployment_flow_output", ""),
+        "deployment_flow_error": service_status.get("deployment_flow_error", ""),
+        "bridge_running": service_status["bridge_process"] is not None,
+        "qr_code_present": bool(service_status.get("qr_code"))
     })
 
 def signal_handler(signum, frame):
