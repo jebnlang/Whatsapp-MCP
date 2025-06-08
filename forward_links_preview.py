@@ -398,6 +398,8 @@ def main():
     parser.add_argument("--db-path", type=str, required=True, help="Path to the WhatsApp messages.db file.")
     parser.add_argument("--delay", type=float, default=DEFAULT_DELAY, help=f"Delay between forwarding messages (default: {DEFAULT_DELAY}).")
     parser.add_argument("--non-interactive", action="store_true", help="Force non-interactive mode using environment variables.")
+    parser.add_argument("--start-date", type=str, help="Manual start date (YYYY-MM-DD HH:MM) - overrides automatic detection.")
+    parser.add_argument("--end-date", type=str, help="Manual end date (YYYY-MM-DD HH:MM) - defaults to now if start-date specified.")
     args = parser.parse_args()
 
     # Check if we should run in non-interactive mode
@@ -448,12 +450,25 @@ def main():
         except Exception as e:
              print(f"An unexpected error during destination group selection: {e}")
 
-    # --- Automatically Determine Time Range Based on Destination Group ---
-    print(f"\nDetermining time range based on last message in destination group...")
-    start_datetime = get_last_message_time_in_group(args.db_path, destination_group_jid)
-    end_datetime = datetime.now()
+    # --- Determine Time Range (Manual or Automatic) ---
+    if args.start_date:
+        print(f"\nUsing manual date range...")
+        try:
+            start_datetime = datetime.strptime(args.start_date, "%Y-%m-%d %H:%M")
+            if args.end_date:
+                end_datetime = datetime.strptime(args.end_date, "%Y-%m-%d %H:%M")
+            else:
+                end_datetime = datetime.now()
+            print(f"  Manual time range specified:")
+        except ValueError as e:
+            print(f"Error: Invalid date format. Use YYYY-MM-DD HH:MM format. Error: {e}")
+            return
+    else:
+        print(f"\nDetermining time range based on last message in destination group...")
+        start_datetime = get_last_message_time_in_group(args.db_path, destination_group_jid)
+        end_datetime = datetime.now()
+        print(f"  Automatic time range detected:")
     
-    print(f"  Time range for link collection:")
     print(f"    From: {start_datetime}")
     print(f"    To: {end_datetime}")
     print(f"    Duration: {end_datetime - start_datetime}")
