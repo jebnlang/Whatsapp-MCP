@@ -223,7 +223,7 @@ type SendMessageRequest struct {
 }
 
 // Function to send a WhatsApp message
-func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message string, mediaPath string) (bool, string) {
+func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, recipient string, message string, mediaPath string) (bool, string) {
 	if !client.IsConnected() {
 		return false, "Not connected to WhatsApp"
 	}
@@ -382,10 +382,40 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 	}
 
 	// Send message
-	_, err = client.SendMessage(context.Background(), recipientJID, msg)
+	resp, err := client.SendMessage(context.Background(), recipientJID, msg)
 
 	if err != nil {
 		return false, fmt.Sprintf("Error sending message: %v", err)
+	}
+
+	// Store the outgoing message in the database
+	if messageStore != nil {
+		// Extract media info if present
+		mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength := extractMediaInfo(msg)
+
+		// Store message with current timestamp and mark as from me
+		err = messageStore.StoreMessage(
+			resp.ID,                  // Message ID from response
+			recipientJID.String(),    // Chat JID
+			client.Store.ID.String(), // Sender (our own JID)
+			message,                  // Message content
+			resp.Timestamp,           // Timestamp from response
+			true,                     // IsFromMe = true for outgoing messages
+			mediaType,                // Media type if any
+			filename,                 // Filename if any
+			url,                      // Media URL if any
+			mediaKey,                 // Media key if any
+			fileSHA256,               // File SHA256 if any
+			fileEncSHA256,            // File encrypted SHA256 if any
+			fileLength,               // File length if any
+			false,                    // Not a reply (for now)
+			"",                       // No quoted message ID
+			"",                       // No quoted sender
+		)
+
+		if err != nil {
+			fmt.Printf("Warning: Failed to store outgoing message in database: %v\n", err)
+		}
 	}
 
 	return true, fmt.Sprintf("Message sent to %s", recipient)
@@ -752,7 +782,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		fmt.Println("Received request to send message", req.Message, req.MediaPath)
 
 		// Send the message
-		success, message := sendWhatsAppMessage(client, req.Recipient, req.Message, req.MediaPath)
+		success, message := sendWhatsAppMessage(client, messageStore, req.Recipient, req.Message, req.MediaPath)
 		fmt.Println("Message sent", success, message)
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")
@@ -1088,7 +1118,7 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 			}
 
 			// Get timestamp from message info
-			timestamp := time.Time{}
+			var timestamp time.Time
 			if ts := latestMsg.Message.GetMessageTimestamp(); ts != 0 {
 				timestamp = time.Unix(int64(ts), 0)
 			} else {
@@ -1155,7 +1185,7 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 				}
 
 				// Get message timestamp
-				timestamp := time.Time{}
+				var timestamp time.Time
 				if ts := msg.Message.GetMessageTimestamp(); ts != 0 {
 					timestamp = time.Unix(int64(ts), 0)
 				} else {
@@ -1198,42 +1228,6 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 	}
 
 	fmt.Printf("History sync complete. Stored %d messages.\n", syncedCount)
-}
-
-// Request history sync from the server
-func requestHistorySync(client *whatsmeow.Client) {
-	if client == nil {
-		fmt.Println("Client is not initialized. Cannot request history sync.")
-		return
-	}
-
-	if !client.IsConnected() {
-		fmt.Println("Client is not connected. Please ensure you are connected to WhatsApp first.")
-		return
-	}
-
-	if client.Store.ID == nil {
-		fmt.Println("Client is not logged in. Please scan the QR code first.")
-		return
-	}
-
-	// Build and send a history sync request
-	historyMsg := client.BuildHistorySyncRequest(nil, 100)
-	if historyMsg == nil {
-		fmt.Println("Failed to build history sync request.")
-		return
-	}
-
-	_, err := client.SendMessage(context.Background(), types.JID{
-		Server: "s.whatsapp.net",
-		User:   "status",
-	}, historyMsg)
-
-	if err != nil {
-		fmt.Printf("Failed to request history sync: %v\n", err)
-	} else {
-		fmt.Println("History sync requested. Waiting for server response...")
-	}
 }
 
 // analyzeOggOpus tries to extract duration and generate a simple waveform from an Ogg Opus file
@@ -1462,14 +1456,6 @@ func handleGetGroupMembers(w http.ResponseWriter, r *http.Request, client *whats
 		writeJSONError(w, "Provided JID is not a group JID", http.StatusBadRequest)
 		return
 	}
-
-	// Use request context if available, otherwise background
-	ctx := r.Context()
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second) // Add a timeout
-	defer cancel()
 
 	groupInfo, err := client.GetGroupInfo(jID)
 	if err != nil {
