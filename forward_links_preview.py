@@ -54,20 +54,26 @@ def get_last_message_time_in_group(db_path, group_jid):
             AND content NOT LIKE '%joined using%'
             AND content NOT LIKE '%became an admin%'
             AND content NOT LIKE '%is no longer an admin%'
+            AND content NOT LIKE '%requested to join%'
+            AND content NOT LIKE '%invitation%'
+            AND content NOT LIKE '%invited%'
         """, (group_jid,))
         
         result = cursor.fetchone()
         if result and result[0]:
             # Convert the timestamp string back to datetime
             last_message_time = datetime.fromisoformat(result[0].replace('Z', '+00:00') if result[0].endswith('Z') else result[0])
+            # If timezone-aware, convert to naive for consistency
+            if last_message_time.tzinfo is not None:
+                last_message_time = last_message_time.replace(tzinfo=None)
             print(f"  Last REAL user message in destination group was at: {last_message_time}")
-            print(f"  (System messages like joins/leaves are excluded)")
+            print(f"  (System messages like joins/leaves/requests are excluded)")
             return last_message_time
         else:
             # No real user messages found in the group, use a default fallback (e.g., 7 days ago)
             fallback_time = datetime.now() - timedelta(days=7)
             print(f"  No real user messages found in destination group, using fallback time: {fallback_time}")
-            print(f"  (System messages like joins/leaves are excluded)")
+            print(f"  (System messages like joins/leaves/requests are excluded)")
             return fallback_time
             
     except sqlite3.Error as e:
@@ -486,6 +492,10 @@ def main():
     total_forwarded_with_preview = 0
     total_forwarded_text_only = 0
     
+    # Track seen links to avoid duplicates
+    seen_links = set()
+    total_duplicates_skipped = 0
+    
     print("\nStarting message search and processing...")
     for group_jid in selected_source_group_jids:
         # --- Get Source Group Name ---
@@ -554,6 +564,15 @@ def main():
                 first_link = links[0]
                 print(f"    DEBUG: Found link: {first_link}") # Keep this debug line
                 
+                # Check for duplicate links
+                if first_link in seen_links:
+                    print(f"    SKIPPING: Link already processed from another group")
+                    total_duplicates_skipped += 1
+                    continue
+                
+                # Add link to seen set
+                seen_links.add(first_link)
+                
                 # --- Get Reply Context --- 
                 reply_prefix = "" # Start with empty prefix
                 if is_reply and quoted_id:
@@ -621,6 +640,7 @@ def main():
     print(f"  Messages processed: {total_processed}")
     print(f"  Forwarded with image+text attempt: {total_forwarded_with_preview}")
     print(f"  Forwarded with text only fallback: {total_forwarded_text_only}")
+    print(f"  Duplicate links skipped: {total_duplicates_skipped}")
     print(f"  (All forwards sent to group: {destination_group_name} [{destination_group_jid}])")
 
 def run_non_interactive_mode(db_path, delay):
@@ -692,6 +712,10 @@ def run_non_interactive_mode(db_path, delay):
     total_forwarded_with_preview = 0
     total_forwarded_text_only = 0
     
+    # Track seen links to avoid duplicates
+    seen_links = set()
+    total_duplicates_skipped = 0
+    
     print("\nStarting message search and processing...")
     for group_jid in selected_source_group_jids:
         source_group_name = group_jid_to_name.get(group_jid, group_jid)
@@ -755,6 +779,15 @@ def run_non_interactive_mode(db_path, delay):
                 first_link = links[0]
                 print(f"    DEBUG: Found link: {first_link}")
                 
+                # Check for duplicate links
+                if first_link in seen_links:
+                    print(f"    SKIPPING: Link already processed from another group")
+                    total_duplicates_skipped += 1
+                    continue
+                
+                # Add link to seen set
+                seen_links.add(first_link)
+                
                 # Get Reply Context
                 reply_prefix = ""
                 if is_reply and quoted_id:
@@ -816,6 +849,7 @@ def run_non_interactive_mode(db_path, delay):
     print(f"  Messages processed: {total_processed}")
     print(f"  Forwarded with image+text attempt: {total_forwarded_with_preview}")
     print(f"  Forwarded with text only fallback: {total_forwarded_text_only}")
+    print(f"  Duplicate links skipped: {total_duplicates_skipped}")
     print(f"  (All forwards sent to: {destination_group_name} [{destination_group_jid}])")
     
     return True
