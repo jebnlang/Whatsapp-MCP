@@ -847,6 +847,76 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 	// New Handler for getting group members using Gorilla Mux
 	router.HandleFunc("/api/group/{jid}/members", makeGroupMemberHandler(client, logger)).Methods(http.MethodGet)
 
+	// Group Management - Remove Participants
+	router.HandleFunc("/api/group/{jid}/participants/remove", func(w http.ResponseWriter, r *http.Request) {
+		vars := mux.Vars(r)
+		groupJID := vars["jid"]
+
+		logger.Infof("Received request to remove participants from group: %s", groupJID)
+
+		var req struct {
+			Participants []string `json:"participants"`
+			Action       string   `json:"action"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			logger.Errorf("Invalid request format: %v", err)
+			writeJSONError(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+
+		if len(req.Participants) == 0 {
+			logger.Errorf("No participants specified for removal")
+			writeJSONError(w, "No participants specified", http.StatusBadRequest)
+			return
+		}
+
+		// Parse group JID
+		jid, err := types.ParseJID(groupJID)
+		if err != nil {
+			logger.Errorf("Invalid group JID: %v", err)
+			writeJSONError(w, "Invalid group JID", http.StatusBadRequest)
+			return
+		}
+
+		// Convert participant strings to JIDs
+		var participantJIDs []types.JID
+		for _, participant := range req.Participants {
+			pJID, err := types.ParseJID(participant)
+			if err != nil {
+				logger.Warnf("Invalid participant JID %s: %v", participant, err)
+				continue
+			}
+			participantJIDs = append(participantJIDs, pJID)
+		}
+
+		if len(participantJIDs) == 0 {
+			logger.Errorf("No valid participant JIDs found")
+			writeJSONError(w, "No valid participants", http.StatusBadRequest)
+			return
+		}
+
+		// Perform the removal
+		_, err = client.UpdateGroupParticipants(jid, participantJIDs, whatsmeow.ParticipantChangeRemove)
+		if err != nil {
+			logger.Errorf("Failed to remove participants: %v", err)
+			writeJSONError(w, fmt.Sprintf("Failed to remove participants: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		logger.Infof("Successfully removed %d participants from group %s", len(participantJIDs), groupJID)
+
+		response := map[string]interface{}{
+			"success":              true,
+			"message":              fmt.Sprintf("Successfully removed %d participants", len(participantJIDs)),
+			"group_jid":            groupJID,
+			"removed_participants": req.Participants,
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+	}).Methods("POST")
+
 	logger.Infof("Starting REST server on port %d", port)
 	// Use the router instead of the default http.ServeMux
 	err := http.ListenAndServe(fmt.Sprintf(":%d", port), router)

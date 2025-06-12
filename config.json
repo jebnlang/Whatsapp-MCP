@@ -1,0 +1,43 @@
+{
+  "destination_group": {
+    "jid": "120363368254989299@g.us",
+    "name": "BSG - Library",
+    "description": "Where all forwarded links will be sent"
+  },
+  "source_groups": [
+    {
+      "jid": "120363315467665376@g.us",
+      "name": "BSG - General 1 (group full)",
+      "enabled": true
+    },
+    {
+      "jid": "120363370824880933@g.us", 
+      "name": "BSG - General 2",
+      "enabled": true
+    },
+    {
+      "jid": "120363385526179109@g.us",
+      "name": "BSG - General 2 (group full)", 
+      "enabled": true
+    },
+    {
+      "jid": "120363372399840576@g.us",
+      "name": "BSG - Off Topic",
+      "enabled": true
+    },
+    {
+      "jid": "120363400841540890@g.us",
+      "name": "BSG - PMF", 
+      "enabled": true
+    },
+    {
+      "jid": "120363357628957729@g.us",
+      "name": "BSG - Production",
+      "enabled": true
+    }
+  ],
+  "settings": {
+    "delay_between_messages": 3.0,
+    "description": "Delay in seconds between forwarding each message"
+  }
+} 
