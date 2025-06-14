@@ -207,6 +207,20 @@ type GroupMembersResponse struct {
 	Members []string `json:"members"`
 }
 
+// Enhanced response structure for group members with detailed info
+type GroupMemberDetailed struct {
+	JID          string `json:"jid"`
+	PhoneNumber  string `json:"phone_number"`
+	DisplayName  string `json:"display_name,omitempty"`
+	IsAdmin      bool   `json:"is_admin"`
+	IsSuperAdmin bool   `json:"is_super_admin"`
+}
+
+type GroupMembersDetailedResponse struct {
+	Members []GroupMemberDetailed `json:"members"`
+	Count   int                   `json:"count"`
+}
+
 // ErrorResponse represents a generic JSON error response
 type ErrorResponse struct {
 	Success bool   `json:"success"`
@@ -1529,16 +1543,8 @@ func handleGetGroupMembers(w http.ResponseWriter, r *http.Request, client *whats
 
 	groupInfo, err := client.GetGroupInfo(jID)
 	if err != nil {
-		// TODO: Check error type more specifically (e.g., group not found vs. permission error)
 		logger.Errorf("Failed to get group info for %s: %v", jidStr, err)
-		// Assuming any error here means not found or inaccessible for simplicity
-		// Check for context deadline exceeded - NOTE: Without context propagation, this specific check won't work here
-		// We'll rely on generic error handling for now.
-		// if err == context.DeadlineExceeded {
-		// 	writeJSONError(w, fmt.Sprintf("Timeout getting info for group %s", jidStr), http.StatusRequestTimeout)
-		// } else {
-		writeJSONError(w, fmt.Sprintf("Could not retrieve info for group %s. It might not exist or access is restricted.", jidStr), http.StatusNotFound) // Or 500?
-		// }
+		writeJSONError(w, fmt.Sprintf("Could not retrieve info for group %s. It might not exist or access is restricted.", jidStr), http.StatusNotFound)
 		return
 	}
 
@@ -1548,15 +1554,62 @@ func handleGetGroupMembers(w http.ResponseWriter, r *http.Request, client *whats
 		return
 	}
 
-	memberJIDs := make([]string, 0, len(groupInfo.Participants))
-	for _, participant := range groupInfo.Participants {
-		if participant.JID.User != "" { // Ensure participant JID is valid
-			memberJIDs = append(memberJIDs, participant.JID.String()) // Get full JID string
-		}
-	}
+	// Check if client wants detailed response (check for 'detailed' query parameter)
+	detailed := r.URL.Query().Get("detailed") == "true"
 
-	logger.Infof("Successfully retrieved %d members for group %s", len(memberJIDs), jidStr)
-	writeJSONResponse(w, GroupMembersResponse{Members: memberJIDs})
+	if detailed {
+		// Return detailed participant information including phone numbers
+		memberDetails := make([]GroupMemberDetailed, 0, len(groupInfo.Participants))
+		for _, participant := range groupInfo.Participants {
+			if participant.JID.User != "" { // Ensure participant JID is valid
+				// Extract phone number from participant
+				phoneNumber := ""
+				if participant.JID.Server == types.DefaultUserServer {
+					// For regular users, the phone number is in the JID User field
+					phoneNumber = participant.JID.User
+				}
+
+				// Get display name from contact store if available
+				displayName := ""
+				contact, err := client.Store.Contacts.GetContact(context.Background(), participant.JID)
+				if err == nil {
+					if contact.FullName != "" {
+						displayName = contact.FullName
+					} else if contact.PushName != "" {
+						displayName = contact.PushName
+					} else if contact.FirstName != "" {
+						displayName = contact.FirstName
+					}
+				}
+
+				memberDetail := GroupMemberDetailed{
+					JID:          participant.JID.String(),
+					PhoneNumber:  phoneNumber,
+					DisplayName:  displayName,
+					IsAdmin:      participant.IsAdmin,
+					IsSuperAdmin: participant.IsSuperAdmin,
+				}
+				memberDetails = append(memberDetails, memberDetail)
+			}
+		}
+
+		logger.Infof("Successfully retrieved %d detailed members for group %s", len(memberDetails), jidStr)
+		writeJSONResponse(w, GroupMembersDetailedResponse{
+			Members: memberDetails,
+			Count:   len(memberDetails),
+		})
+	} else {
+		// Return simple JID list (backwards compatibility)
+		memberJIDs := make([]string, 0, len(groupInfo.Participants))
+		for _, participant := range groupInfo.Participants {
+			if participant.JID.User != "" { // Ensure participant JID is valid
+				memberJIDs = append(memberJIDs, participant.JID.String()) // Get full JID string
+			}
+		}
+
+		logger.Infof("Successfully retrieved %d members for group %s", len(memberJIDs), jidStr)
+		writeJSONResponse(w, GroupMembersResponse{Members: memberJIDs})
+	}
 }
 
 // RestoreSessionFromBase64 restores WhatsApp session from base64 encoded environment variable

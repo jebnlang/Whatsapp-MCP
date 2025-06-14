@@ -8,8 +8,9 @@ by extending the existing WhatsApp bridge with group management capabilities.
 Features:
 1. Remove users from groups programmatically
 2. Bulk removal from CSV of common contacts
-3. Admin permission validation
-4. Detailed logging and error handling
+3. Whitelist support to protect important contacts
+4. Admin permission validation
+5. Detailed logging and error handling
 
 Requirements:
 - WhatsApp bridge server running on localhost:8080
@@ -36,13 +37,16 @@ class RemovalResult:
     success: bool
     message: str
     error_code: Optional[str] = None
+    skipped: bool = False
+    skip_reason: Optional[str] = None
 
 
 class GroupManager:
     """Manages WhatsApp group operations via the bridge API"""
     
-    def __init__(self, bridge_url: str = "http://localhost:8080"):
+    def __init__(self, bridge_url: str = "http://localhost:8080", whitelist: Optional[Set[str]] = None):
         self.bridge_url = bridge_url.rstrip('/')
+        self.whitelist = whitelist or set()
         self.session = requests.Session()
         self.session.headers.update({
             'Content-Type': 'application/json',
@@ -59,6 +63,13 @@ class GroupManager:
             ]
         )
         self.logger = logging.getLogger(__name__)
+        
+        if self.whitelist:
+            self.logger.info(f"🔒 Whitelist active with {len(self.whitelist)} protected JIDs")
+    
+    def is_whitelisted(self, jid: str) -> bool:
+        """Check if a JID is in the whitelist"""
+        return jid in self.whitelist
     
     def get_group_members(self, group_jid: str) -> List[str]:
         """Get all members of a group"""
@@ -76,6 +87,19 @@ class GroupManager:
     
     def remove_group_participant(self, group_jid: str, participant_jid: str) -> RemovalResult:
         """Remove a single participant from a group"""
+        
+        # Check whitelist first
+        if self.is_whitelisted(participant_jid):
+            self.logger.info(f"🔒 Skipping whitelisted contact: {participant_jid}")
+            return RemovalResult(
+                jid=participant_jid,
+                group_jid=group_jid,
+                success=False,
+                message="Skipped - contact is whitelisted",
+                skipped=True,
+                skip_reason="whitelisted"
+            )
+        
         try:
             url = f"{self.bridge_url}/api/group/{group_jid}/participants/remove"
             payload = {
@@ -120,23 +144,29 @@ class GroupManager:
         results = []
         total = len(participant_jids)
         
+        # Count whitelisted contacts
+        whitelisted_count = len([jid for jid in participant_jids if self.is_whitelisted(jid)])
+        
         self.logger.info(f"Starting bulk removal of {total} participants from group {group_jid}")
+        if whitelisted_count > 0:
+            self.logger.info(f"🔒 {whitelisted_count} contacts will be skipped (whitelisted)")
         
         for i, participant_jid in enumerate(participant_jids, 1):
-            self.logger.info(f"Removing participant {i}/{total}: {participant_jid}")
+            self.logger.info(f"Processing participant {i}/{total}: {participant_jid}")
             
             result = self.remove_group_participant(group_jid, participant_jid)
             results.append(result)
             
-            # Rate limiting to avoid being flagged
-            if i < total:  # Don't delay after the last removal
+            # Only delay if we actually made a removal request (not skipped)
+            if not result.skipped and i < total:
                 time.sleep(delay_seconds)
         
         # Summary
         successful = len([r for r in results if r.success])
-        failed = len([r for r in results if not r.success])
+        failed = len([r for r in results if not r.success and not r.skipped])
+        skipped = len([r for r in results if r.skipped])
         
-        self.logger.info(f"Bulk removal complete: {successful} successful, {failed} failed")
+        self.logger.info(f"Bulk removal complete: {successful} successful, {failed} failed, {skipped} skipped")
         return results
     
     def remove_common_contacts_from_groups(self, csv_file: str, group1_jid: str, group2_jid: str,
@@ -149,7 +179,16 @@ class GroupManager:
             self.logger.error("No common contacts found in CSV file")
             return {}
         
-        self.logger.info(f"Found {len(common_contacts)} common contacts to remove")
+        self.logger.info(f"Found {len(common_contacts)} common contacts to process")
+        
+        # Check whitelist impact
+        whitelisted_contacts = [c for c in common_contacts if self.is_whitelisted(c['jid'])]
+        if whitelisted_contacts:
+            self.logger.info(f"🔒 {len(whitelisted_contacts)} contacts are whitelisted and will be skipped:")
+            for contact in whitelisted_contacts[:5]:  # Show first 5
+                self.logger.info(f"   • {contact['name']} ({contact['jid']})")
+            if len(whitelisted_contacts) > 5:
+                self.logger.info(f"   • ... and {len(whitelisted_contacts) - 5} more")
         
         results = {}
         
@@ -184,9 +223,11 @@ class GroupManager:
                 for row in reader:
                     if row.get('jid'):  # Only include rows with valid JID
                         contacts.append({
-                            'phone_number': row.get('phone_number', ''),
                             'name': row.get('name', ''),
-                            'jid': row.get('jid', '')
+                            'jid': row.get('jid', ''),
+                            'source': row.get('source', ''),
+                            'is_admin': row.get('is_admin', 'False').lower() == 'true',
+                            'is_super_admin': row.get('is_super_admin', 'False').lower() == 'true'
                         })
         
         except FileNotFoundError:
@@ -196,11 +237,31 @@ class GroupManager:
         
         return contacts
     
+    def load_whitelist_from_file(self, whitelist_file: str) -> Set[str]:
+        """Load whitelist JIDs from a text file (one JID per line)"""
+        whitelist = set()
+        
+        try:
+            with open(whitelist_file, 'r', encoding='utf-8') as file:
+                for line in file:
+                    jid = line.strip()
+                    if jid and not jid.startswith('#'):  # Skip empty lines and comments
+                        whitelist.add(jid)
+            
+            self.logger.info(f"Loaded {len(whitelist)} JIDs from whitelist file: {whitelist_file}")
+            
+        except FileNotFoundError:
+            self.logger.warning(f"Whitelist file not found: {whitelist_file}")
+        except Exception as e:
+            self.logger.error(f"Error reading whitelist file: {e}")
+        
+        return whitelist
+    
     def save_removal_results(self, results: Dict[str, List[RemovalResult]], output_file: str):
         """Save removal results to a CSV file"""
         try:
             with open(output_file, 'w', newline='', encoding='utf-8') as file:
-                fieldnames = ['group_jid', 'participant_jid', 'success', 'message', 'error_code', 'timestamp']
+                fieldnames = ['group_jid', 'participant_jid', 'success', 'skipped', 'skip_reason', 'message', 'error_code', 'timestamp']
                 writer = csv.DictWriter(file, fieldnames=fieldnames)
                 writer.writeheader()
                 
@@ -212,6 +273,8 @@ class GroupManager:
                             'group_jid': result.group_jid,
                             'participant_jid': result.jid,
                             'success': result.success,
+                            'skipped': result.skipped,
+                            'skip_reason': result.skip_reason or '',
                             'message': result.message,
                             'error_code': result.error_code or '',
                             'timestamp': timestamp
@@ -223,81 +286,7 @@ class GroupManager:
             self.logger.error(f"Failed to save results: {e}")
 
 
-def extend_bridge_with_group_management():
-    """
-    Instructions to extend the Go bridge with group management endpoints.
-    This needs to be added to main.go in the startRESTServer function.
-    """
-    
-    go_code_extension = '''
-    // Add this to the REST server routes in main.go:
-    
-    // Handler for removing group participants
-    router.HandleFunc("/api/group/{jid}/participants/remove", func(w http.ResponseWriter, r *http.Request) {
-        vars := mux.Vars(r)
-        groupJID := vars["jid"]
-        
-        var req struct {
-            Participants []string `json:"participants"`
-            Action       string   `json:"action"`
-        }
-        
-        if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-            writeJSONError(w, "Invalid request format", http.StatusBadRequest)
-            return
-        }
-        
-        if len(req.Participants) == 0 {
-            writeJSONError(w, "No participants specified", http.StatusBadRequest)
-            return
-        }
-        
-        // Parse group JID
-        groupJIDParsed, err := types.ParseJID(groupJID)
-        if err != nil {
-            writeJSONError(w, "Invalid group JID", http.StatusBadRequest)
-            return
-        }
-        
-        // Convert participant strings to JIDs
-        participantJIDs := make([]types.JID, len(req.Participants))
-        for i, p := range req.Participants {
-            participantJIDs[i], err = types.ParseJID(p)
-            if err != nil {
-                writeJSONError(w, fmt.Sprintf("Invalid participant JID: %s", p), http.StatusBadRequest)
-                return
-            }
-        }
-        
-        // Perform the removal
-        removedParticipants, err := client.UpdateGroupParticipants(
-            groupJIDParsed, 
-            participantJIDs, 
-            whatsmeow.ParticipantChangeRemove,
-        )
-        
-        if err != nil {
-            logger.Errorf("Failed to remove participants: %v", err)
-            writeJSONError(w, fmt.Sprintf("Failed to remove participants: %v", err), http.StatusInternalServerError)
-            return
-        }
-        
-        writeJSONResponse(w, map[string]interface{}{
-            "success": true,
-            "message": fmt.Sprintf("Successfully processed %d participants", len(removedParticipants)),
-            "removed_participants": removedParticipants,
-        })
-        
-    }).Methods(http.MethodPost)
-    
-    // Handler for adding group participants  
-    router.HandleFunc("/api/group/{jid}/participants/add", func(w http.ResponseWriter, r *http.Request) {
-        // Similar implementation for adding participants
-        // ... (implement as needed)
-    }).Methods(http.MethodPost)
-    '''
-    
-    return go_code_extension
+
 
 
 def main():
@@ -316,6 +305,10 @@ def main():
                        help='Show what would be removed without actually removing')
     parser.add_argument('--output', default='removal_results.csv',
                        help='Output file for removal results')
+    parser.add_argument('--whitelist', type=str,
+                       help='File containing JIDs to whitelist (one per line)')
+    parser.add_argument('--whitelist-jids', type=str, nargs='*',
+                       help='Individual JIDs to whitelist (space separated)')
     
     args = parser.parse_args()
     
@@ -323,36 +316,58 @@ def main():
     print("🤖 WhatsApp Group Management Tool")
     print("=" * 80)
     
-    # Check if bridge extension is needed
-    print("\n⚠️  IMPORTANT: Bridge Extension Required")
-    print("=" * 50)
-    print("This script requires group management endpoints to be added to your Go bridge.")
-    print("Please add the following code to your main.go file in the startRESTServer function:")
-    print("\n" + extend_bridge_with_group_management())
-    print("\n" + "=" * 50)
+    # Build whitelist
+    whitelist = set()
     
-    response = input("\nHave you added the group management endpoints to main.go? (y/N): ")
-    if response.lower() != 'y':
-        print("Please add the endpoints first and restart your bridge, then run this script again.")
-        return
+    # Load from file
+    if args.whitelist:
+        manager_temp = GroupManager()  # Temporary instance for loading
+        whitelist.update(manager_temp.load_whitelist_from_file(args.whitelist))
     
-    # Initialize group manager
-    manager = GroupManager(args.bridge_url)
+    # Add individual JIDs
+    if args.whitelist_jids:
+        whitelist.update(args.whitelist_jids)
+        print(f"Added {len(args.whitelist_jids)} JIDs from command line to whitelist")
+    
+    if whitelist:
+        print(f"\n🔒 Whitelist Configuration:")
+        print(f"   Protected contacts: {len(whitelist)}")
+        print("   Sample whitelisted JIDs:")
+        for jid in list(whitelist)[:3]:
+            print(f"     • {jid}")
+        if len(whitelist) > 3:
+            print(f"     • ... and {len(whitelist) - 3} more")
+    
+    # Initialize group manager with whitelist
+    manager = GroupManager(args.bridge_url, whitelist)
     
     if args.dry_run:
         print(f"\n🔍 DRY RUN MODE - Analyzing what would be removed...")
         
-        # Read contacts that would be removed
+        # Read contacts that would be processed
         contacts = manager.read_common_contacts_csv(args.csv_file)
-        print(f"\nFound {len(contacts)} contacts in CSV file that would be removed:")
+        print(f"\nFound {len(contacts)} contacts in CSV file:")
         
-        for i, contact in enumerate(contacts[:10], 1):  # Show first 10
-            print(f"  {i}. {contact['name']} ({contact['phone_number']}) - {contact['jid']}")
+        # Categorize contacts
+        to_remove = [c for c in contacts if not manager.is_whitelisted(c['jid'])]
+        to_skip = [c for c in contacts if manager.is_whitelisted(c['jid'])]
         
-        if len(contacts) > 10:
-            print(f"  ... and {len(contacts) - 10} more")
+        print(f"\n📋 Contacts that WOULD BE REMOVED ({len(to_remove)}):")
+        for i, contact in enumerate(to_remove[:10], 1):
+            admin_status = " [ADMIN]" if contact.get('is_admin') or contact.get('is_super_admin') else ""
+            print(f"  {i}. {contact['name']}{admin_status} - {contact['jid']}")
+        if len(to_remove) > 10:
+            print(f"  ... and {len(to_remove) - 10} more")
         
-        print(f"\nThese contacts would be removed from:")
+        if to_skip:
+            print(f"\n🔒 Contacts that WOULD BE SKIPPED ({len(to_skip)}):")
+            for i, contact in enumerate(to_skip[:5], 1):
+                admin_status = " [ADMIN]" if contact.get('is_admin') or contact.get('is_super_admin') else ""
+                print(f"  {i}. {contact['name']}{admin_status} - {contact['jid']} (whitelisted)")
+            if len(to_skip) > 5:
+                print(f"  ... and {len(to_skip) - 5} more")
+        
+        print(f"\nThese changes would be applied to:")
         print(f"  - Group 1: {args.group1}")
         print(f"  - Group 2: {args.group2}")
         
@@ -360,7 +375,13 @@ def main():
         return
     
     # Confirm the operation
-    print(f"\n⚠️  WARNING: This will remove common contacts from both groups!")
+    contacts = manager.read_common_contacts_csv(args.csv_file)
+    to_remove = [c for c in contacts if not manager.is_whitelisted(c['jid'])]
+    to_skip = [c for c in contacts if manager.is_whitelisted(c['jid'])]
+    
+    print(f"\n⚠️  WARNING: This will remove {len(to_remove)} contacts from both groups!")
+    if to_skip:
+        print(f"🔒 {len(to_skip)} contacts will be skipped (whitelisted)")
     print(f"CSV file: {args.csv_file}")
     print(f"Group 1: {args.group1}")
     print(f"Group 2: {args.group2}")
@@ -384,8 +405,21 @@ def main():
     # Save results
     manager.save_removal_results(results, args.output)
     
-    # Print summary
+    # Print final summary
+    total_successful = 0
+    total_failed = 0
+    total_skipped = 0
+    
+    for group_results in results.values():
+        total_successful += len([r for r in group_results if r.success])
+        total_failed += len([r for r in group_results if not r.success and not r.skipped])
+        total_skipped += len([r for r in group_results if r.skipped])
+    
     print(f"\n✅ Operation Complete!")
+    print(f"📊 Final Summary:")
+    print(f"   ✓ Successfully removed: {total_successful}")
+    print(f"   ✗ Failed to remove: {total_failed}")
+    print(f"   🔒 Skipped (whitelisted): {total_skipped}")
     print(f"Results saved to: {args.output}")
     print(f"Check the log file for detailed information: group_management.log")
 

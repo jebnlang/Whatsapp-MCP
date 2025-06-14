@@ -1,0 +1,17 @@
+# WhatsApp Group Management Whitelist
+# One JID per line, comments start with #
+# These contacts will be protected from removal
+
+# Your contact (Ben Lang)
+972526060403@s.whatsapp.net
+
+# Add more JIDs below as needed
+# Example format:
+# 972523451451@s.whatsapp.net
+# 44431570911359@lid 
+# Auto-added from phone numbers on 2025-06-12 21:04:42
+972528209295@s.whatsapp.net
+972546667650@s.whatsapp.net
+972546732529@s.whatsapp.net
+972527455314@s.whatsapp.net
+972546666890@s.whatsapp.net

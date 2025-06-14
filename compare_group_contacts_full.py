@@ -6,19 +6,19 @@ This script compares ALL contacts between two WhatsApp groups (including those w
 and creates a CSV of contacts that exist in both groups.
 
 Features:
-- Gets complete group member lists via WhatsApp bridge API
+- Gets complete group member lists via WhatsApp bridge API with detailed info
+- Uses JID-based identification (no phone number extraction needed)
 - Falls back to message-based analysis if API unavailable
-- Extracts phone numbers and contact names
-- Generates CSV with phone_number, name, jid columns
+- Generates CSV with name, jid, admin status columns
 
 Usage:
     python compare_group_contacts_full.py
 
 The script will:
-1. Try to get ALL members from both groups via API
+1. Try to get ALL members from both groups via detailed API
 2. Fall back to message senders if API unavailable
-3. Find contacts that exist in both groups
-4. Generate detailed CSV with contact information
+3. Find contacts that exist in both groups using JIDs
+4. Generate detailed CSV with contact information for group management
 """
 
 import sqlite3
@@ -36,8 +36,9 @@ class Contact:
     """Represents a WhatsApp contact"""
     jid: str
     name: Optional[str] = None
-    phone_number: Optional[str] = None
     source: str = "unknown"  # "api", "messages", or "unknown"
+    is_admin: bool = False
+    is_super_admin: bool = False
 
 
 class EnhancedWhatsAppGroupComparator:
@@ -67,9 +68,45 @@ class EnhancedWhatsAppGroupComparator:
         except:
             return False
     
-    def get_group_members_via_api(self, group_jid: str) -> Optional[Set[str]]:
+    def get_group_members_via_detailed_api(self, group_jid: str) -> Optional[List[Contact]]:
         """
-        Get ALL group members via the WhatsApp bridge API.
+        Get ALL group members via the enhanced WhatsApp bridge API with detailed info.
+        
+        Args:
+            group_jid: The JID of the group
+            
+        Returns:
+            List of Contact objects if successful, None if failed
+        """
+        try:
+            url = f"{self.api_base_url}/api/group/{group_jid}/members?detailed=true"
+            response = requests.get(url, timeout=15)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if "members" in data:
+                    contacts = []
+                    for member in data["members"]:
+                        contact = Contact(
+                            jid=member.get("jid", ""),
+                            name=member.get("display_name", ""),
+                            source="detailed_api",
+                            is_admin=member.get("is_admin", False),
+                            is_super_admin=member.get("is_super_admin", False)
+                        )
+                        contacts.append(contact)
+                    return contacts
+            
+            print(f"Detailed API request failed with status {response.status_code}: {response.text}")
+            return None
+            
+        except Exception as e:
+            print(f"Error calling detailed API for group {group_jid}: {e}")
+            return None
+    
+    def get_group_members_via_simple_api(self, group_jid: str) -> Optional[Set[str]]:
+        """
+        Get ALL group members via the simple WhatsApp bridge API (fallback).
         
         Args:
             group_jid: The JID of the group
@@ -86,29 +123,12 @@ class EnhancedWhatsAppGroupComparator:
                 if "members" in data:
                     return set(data["members"])
             
-            print(f"API request failed with status {response.status_code}: {response.text}")
+            print(f"Simple API request failed with status {response.status_code}: {response.text}")
             return None
             
         except Exception as e:
-            print(f"Error calling API for group {group_jid}: {e}")
+            print(f"Error calling simple API for group {group_jid}: {e}")
             return None
-    
-    def extract_phone_number(self, jid: str) -> Optional[str]:
-        """
-        Extract phone number from JID if possible.
-        
-        Args:
-            jid: WhatsApp JID (e.g., '972545831336@s.whatsapp.net' or '66846921380038@lid')
-            
-        Returns:
-            Phone number if extractable, None otherwise
-        """
-        # For @s.whatsapp.net format, the phone number is before the @
-        if "@s.whatsapp.net" in jid:
-            return jid.split("@")[0]
-        
-        # For @lid format, we can't extract a phone number
-        return None
     
     def get_group_contacts_from_messages(self, group_jid: str) -> Set[str]:
         """
@@ -136,33 +156,9 @@ class EnhancedWhatsAppGroupComparator:
         conn.close()
         return contacts
     
-    def get_group_contacts(self, group_jid: str) -> Tuple[Set[str], str]:
+    def get_contact_name_from_db(self, jid: str) -> Optional[str]:
         """
-        Get group contacts, trying API first, then falling back to messages.
-        
-        Args:
-            group_jid: The JID of the group
-            
-        Returns:
-            Tuple of (contact set, source method used)
-        """
-        # Try API first
-        if self.check_api_availability():
-            print(f"🌐 Trying API for group {group_jid}...")
-            api_contacts = self.get_group_members_via_api(group_jid)
-            if api_contacts is not None:
-                return api_contacts, "api"
-            print("❌ API failed, falling back to message analysis...")
-        else:
-            print("❌ API not available, using message analysis...")
-        
-        # Fallback to message-based approach
-        message_contacts = self.get_group_contacts_from_messages(group_jid)
-        return message_contacts, "messages"
-    
-    def get_contact_name(self, jid: str) -> Optional[str]:
-        """
-        Get the name for a contact from the contacts database.
+        Get the name for a contact from the contacts database (fallback).
         
         Args:
             jid: The contact's JID
@@ -191,6 +187,55 @@ class EnhancedWhatsAppGroupComparator:
         
         return None
     
+    def get_group_contacts(self, group_jid: str) -> Tuple[List[Contact], str]:
+        """
+        Get group contacts with full details, trying enhanced API first.
+        
+        Args:
+            group_jid: The JID of the group
+            
+        Returns:
+            Tuple of (contact list, source method used)
+        """
+        # Try enhanced detailed API first
+        if self.check_api_availability():
+            print(f"🌐 Trying detailed API for group {group_jid}...")
+            detailed_contacts = self.get_group_members_via_detailed_api(group_jid)
+            if detailed_contacts is not None:
+                print(f"✅ Got detailed info for {len(detailed_contacts)} members")
+                return detailed_contacts, "detailed_api"
+            
+            print("❌ Detailed API failed, trying simple API...")
+            # Try simple API as fallback
+            simple_jids = self.get_group_members_via_simple_api(group_jid)
+            if simple_jids is not None:
+                print(f"✅ Got simple JIDs for {len(simple_jids)} members, enhancing with DB lookup...")
+                contacts = []
+                for jid in simple_jids:
+                    contact = Contact(
+                        jid=jid,
+                        name=self.get_contact_name_from_db(jid),
+                        source="simple_api"
+                    )
+                    contacts.append(contact)
+                return contacts, "simple_api"
+            
+            print("❌ All API methods failed, falling back to message analysis...")
+        else:
+            print("❌ API not available, using message analysis...")
+        
+        # Fallback to message-based approach
+        message_jids = self.get_group_contacts_from_messages(group_jid)
+        contacts = []
+        for jid in message_jids:
+            contact = Contact(
+                jid=jid,
+                name=self.get_contact_name_from_db(jid),
+                source="messages"
+            )
+            contacts.append(contact)
+        return contacts, "messages"
+    
     def compare_groups(self, group1_jid: str, group2_jid: str) -> List[Contact]:
         """
         Compare contacts between two groups and return common contacts.
@@ -218,12 +263,19 @@ class EnhancedWhatsAppGroupComparator:
         group2_contacts, group2_source = self.get_group_contacts(group2_jid)
         print(f"✅ Found {len(group2_contacts)} contacts in Group 2 (via {group2_source})")
         
-        # Find intersection (common contacts)
-        common_jids = group1_contacts.intersection(group2_contacts)
+        # Create lookup dictionaries by JID
+        group1_dict = {contact.jid: contact for contact in group1_contacts}
+        group2_dict = {contact.jid: contact for contact in group2_contacts}
+        
+        # Find intersection (common JIDs)
+        common_jids = set(group1_dict.keys()).intersection(set(group2_dict.keys()))
         print(f"\n🎯 Found {len(common_jids)} contacts that exist in both groups")
         
         # Determine overall source method
-        if group1_source == "api" and group2_source == "api":
+        if group1_source == "detailed_api" and group2_source == "detailed_api":
+            overall_source = "detailed_api"
+            print("✨ Complete member lists with admin status obtained via enhanced API")
+        elif "api" in group1_source and "api" in group2_source:
             overall_source = "api"
             print("✨ Complete member lists obtained via API")
         elif group1_source == "messages" and group2_source == "messages":
@@ -233,16 +285,18 @@ class EnhancedWhatsAppGroupComparator:
             overall_source = "mixed"
             print("⚠️  Mixed data sources - results may be incomplete")
         
-        # Create Contact objects with names and phone numbers
-        print(f"\n🔍 Looking up contact details...")
+        # Create Contact objects for common contacts, preferring Group 1 data
         common_contacts = []
         for jid in common_jids:
-            contact = Contact(
-                jid=jid,
-                name=self.get_contact_name(jid),
-                phone_number=self.extract_phone_number(jid),
-                source=overall_source
-            )
+            contact = group1_dict[jid]  # Use Group 1 data as primary
+            
+            # If Group 1 doesn't have name but Group 2 does, use Group 2's
+            if not contact.name and group2_dict[jid].name:
+                contact.name = group2_dict[jid].name
+            
+            # Update source to reflect the overall analysis
+            contact.source = overall_source
+            
             common_contacts.append(contact)
         
         # Sort by name (put unnamed contacts at the end)
@@ -261,16 +315,17 @@ class EnhancedWhatsAppGroupComparator:
         with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
             writer = csv.writer(csvfile)
             
-            # Write header
-            writer.writerow(['phone_number', 'name', 'jid', 'source'])
+            # Write header - removed phone_number column
+            writer.writerow(['name', 'jid', 'source', 'is_admin', 'is_super_admin'])
             
             # Write contacts
             for contact in contacts:
                 writer.writerow([
-                    contact.phone_number or '',
                     contact.name or '',
                     contact.jid,
-                    contact.source
+                    contact.source,
+                    contact.is_admin,
+                    contact.is_super_admin
                 ])
         
         print(f"\n💾 Exported {len(contacts)} contacts to {filename}")
@@ -282,50 +337,62 @@ class EnhancedWhatsAppGroupComparator:
         print("="*70)
         
         # Statistics
-        contacts_with_phone = [c for c in contacts if c.phone_number]
         contacts_with_name = [c for c in contacts if c.name]
-        contacts_api_source = [c for c in contacts if c.source == "api"]
-        contacts_message_source = [c for c in contacts if c.source == "messages"]
+        admin_contacts = [c for c in contacts if c.is_admin]
+        super_admin_contacts = [c for c in contacts if c.is_super_admin]
+        detailed_api_contacts = [c for c in contacts if c.source == "detailed_api"]
         
         print(f"📊 Statistics:")
         print(f"   Total common contacts: {len(contacts)}")
-        print(f"   Contacts with phone numbers: {len(contacts_with_phone)}")
-        print(f"   Contacts with names: {len(contacts_with_name)}")
-        print(f"   Via API (complete): {len(contacts_api_source)}")
-        print(f"   Via messages (limited): {len(contacts_message_source)}")
+        print(f"   Contacts with names: {len(contacts_with_name)} ({len(contacts_with_name)/len(contacts)*100:.1f}%)")
+        print(f"   Admin contacts: {len(admin_contacts)}")
+        print(f"   Super admin contacts: {len(super_admin_contacts)}")
+        print(f"   Via detailed API: {len(detailed_api_contacts)}")
         
         # Sample contacts
         print(f"\n📝 Sample contacts (first 15):")
-        print("-" * 70)
-        print(f"{'#':<3} {'Name':<25} {'Phone':<15} {'Source':<8} {'JID'}")
-        print("-" * 70)
+        print("-" * 80)
+        print(f"{'#':<3} {'Name':<25} {'Admin':<6} {'Source':<12} {'JID'}")
+        print("-" * 80)
         
         for i, contact in enumerate(contacts[:15], 1):
             name = contact.name or "Unknown"
-            phone = contact.phone_number or "No phone"
+            admin_status = "Admin" if contact.is_super_admin else ("Mod" if contact.is_admin else "User")
             source = contact.source
             
             # Truncate long names and JIDs for display
             name = name[:24] if len(name) > 24 else name
-            jid_display = contact.jid[:30] + "..." if len(contact.jid) > 33 else contact.jid
+            jid_display = contact.jid[:25] + "..." if len(contact.jid) > 28 else contact.jid
             
-            print(f"{i:<3} {name:<25} {phone:<15} {source:<8} {jid_display}")
+            print(f"{i:<3} {name:<25} {admin_status:<6} {source:<12} {jid_display}")
         
         if len(contacts) > 15:
             print(f"... and {len(contacts) - 15} more contacts")
         
-        print("-" * 70)
+        print("-" * 80)
         
         # Data source explanation
         print(f"\n💡 Data Source Information:")
-        if contacts and contacts[0].source == "api":
-            print("   ✅ Complete member lists: Includes ALL group members")
-            print("   📱 This includes members who never sent messages")
+        if contacts and contacts[0].source == "detailed_api":
+            print("   ✅ Enhanced API: Complete member lists with admin status")
+            print("   📱 Includes ALL group members (JIDs are used for identification)")
+            print("   👑 Admin status information included")
+            print("   🔑 JIDs can be used directly for group management operations")
+        elif contacts and "api" in contacts[0].source:
+            print("   ✅ API-based: Complete member lists obtained")
+            print("   📱 Includes ALL group members")
+            print("   🔑 JIDs can be used for group management operations")
         elif contacts and contacts[0].source == "messages":
             print("   ⚠️  Message-based analysis: Only members who sent messages")
             print("   🤐 Silent members are not included in this comparison")
         else:
             print("   ⚠️  Mixed data sources: Results may be incomplete")
+        
+        print(f"\n💡 JID-Based Identification:")
+        print("   🆔 Each contact has a unique JID (WhatsApp identifier)")
+        print("   🔄 Same JID = same person across both groups")
+        print("   🚀 JIDs work directly with group management APIs")
+        print("   🔒 @lid format used in groups (privacy-protected)")
 
 
 def main():
@@ -352,6 +419,7 @@ def main():
     comparator = EnhancedWhatsAppGroupComparator(messages_db, contacts_db)
     
     try:
+        print("🚀 Starting enhanced group comparison using JID-based identification...")
         common_contacts = comparator.compare_groups(group1_jid, group2_jid)
         
         # Export to CSV
@@ -361,6 +429,7 @@ def main():
         comparator.print_detailed_summary(common_contacts)
         
         print(f"\n🎉 Analysis complete! Check 'common_contacts_full.csv' for full results.")
+        print(f"💡 The JIDs in the CSV can be used directly for group management operations.")
         
     except sqlite3.Error as e:
         print(f"❌ Database error: {e}")
